@@ -856,95 +856,68 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
     user_data = get_user(user_id)
     
-    if not user_data:
-        await update.message.reply_text("❌ Вы не зарегистрированы. Используйте /start.")
-        return
-    
     try:
         bet_amount = int(update.message.text)
         if bet_amount <= 0:
-            await update.message.reply_text("❌ Сумма ставки должна быть положительной.")
+            await update.message.reply_text("❌ Сумма ставки должна быть положительной!")
             return
             
         if user_data['balance'] < bet_amount:
-            await update.message.reply_text("❌ Недостаточно средств на балансе.")
+            await update.message.reply_text(f"❌ Недостаточно средств! Баланс: {user_data['balance']}")
             return
-    except ValueError:
-        await update.message.reply_text("❌ Введите целое число")
-        return
-    
-    if 'current_game' not in context.user_data:
-        await update.message.reply_text("❌ Сначала выберите игру из меню")
-        return
-    
-    game_type = context.user_data['current_game']
-    
-    if game_type == 'dice':
-        if 'dice_guess' not in context.user_data:
-            await update.message.reply_text("❌ Сначала выберите число")
-            return
-        
-        guess = context.user_data['dice_guess']
-        won, coefficient, roll = await play_dice(user_id, bet_amount, guess)
-        
-        keyboard = [
-            [InlineKeyboardButton("🎲 Играть снова", callback_data='game_dice')],
-            [InlineKeyboardButton("🔙 В меню", callback_data='back_to_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if won:
-            await update.message.reply_text(
-                f"🎉 Поздравляем! Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
-                f"🎲 Выпало: {roll} (ставка: {guess})\n"
-                f"📈 Коэф: {coefficient:.2f}x\n"
-                f"💰 Баланс: {user_data['balance'] + bet_amount * coefficient:.0f}",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Проигрыш: {bet_amount} монет\n"
-                f"🎲 Выпало: {roll} (ставка: {guess})\n"
-                f"📈 Коэф был: {coefficient:.2f}x\n"
-                f"💰 Баланс: {user_data['balance'] - bet_amount}",
-                reply_markup=reply_markup
-            )
-    
-    elif game_type == 'slots':
-        won, coefficient, reels = await play_slots(user_id, bet_amount)
-        
-        keyboard = [
-            [InlineKeyboardButton("🎰 Играть снова", callback_data='game_slots')],
-            [InlineKeyboardButton("🔙 В меню", callback_data='back_to_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if won:
-            if reels[0] == reels[1] == reels[2]:
-                win_text = "🎉 ДЖЕКПОТ! Три 7!" if reels[0] == '7' else "🎉 Три одинаковых!"
-            else:
-                win_text = "🎉 Два одинаковых!"
             
-            await update.message.reply_text(
-                f"{win_text}\n"
-                f"🎰 {' '.join(reels)}\n"
-                f"💰 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
+        game_type = context.user_data['current_game']
+        
+        if game_type == 'dice':
+            if 'dice_guess' not in context.user_data:
+                await update.message.reply_text("❌ Сначала выберите число!")
+                return
+                
+            guess = context.user_data['dice_guess']
+            won, coefficient, roll = await play_dice(user_id, bet_amount, guess)
+            
+            response = (
+                f"🎉 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
+                f"🎲 Выпало: {roll} (ставка: {guess})\n"
                 f"📈 Коэф: {coefficient:.2f}x\n"
-                f"💰 Баланс: {user_data['balance'] + bet_amount * coefficient:.0f}",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text(
+                if won else
                 f"❌ Проигрыш: {bet_amount} монет\n"
-                f"🎰 {' '.join(reels)}\n"
-                f"📈 Коэф был: {coefficient:.2f}x\n"
-                f"💰 Баланс: {user_data['balance'] - bet_amount}",
-                reply_markup=reply_markup
+                f"🎲 Выпало: {roll} (ставка: {guess})\n"
             )
-    
-    context.user_data.pop('current_game', None)
-    context.user_data.pop('dice_guess', None)
-
+            
+        elif game_type == 'slots':
+            won, coefficient, reels = await play_slots(user_id, bet_amount)
+            
+            if won:
+                if reels[0] == reels[1] == reels[2]:
+                    win_text = "🎉 ДЖЕКПОТ! Три 7!" if reels[0] == '7' else "🎉 Три одинаковых!"
+                else:
+                    win_text = "🎉 Два одинаковых!"
+                
+                response = (
+                    f"{win_text}\n🎰 {' '.join(reels)}\n"
+                    f"💰 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
+                )
+            else:
+                response = (
+                    f"❌ Проигрыш: {bet_amount} монет\n"
+                    f"🎰 {' '.join(reels)}\n"
+                )
+        
+        # Общий вывод для всех игр
+        response += f"💰 Баланс: {get_user(user_id)['balance']}"
+        keyboard = [
+            [InlineKeyboardButton("🔄 Играть снова", callback_data=f'game_{game_type}')],
+            [InlineKeyboardButton("🔙 В меню", callback_data='back_to_menu')]
+        ]
+        await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # Очищаем контекст
+        context.user_data.pop('current_game', None)
+        context.user_data.pop('dice_guess', None)
+        
+    except ValueError:
+        await update.message.reply_text("❌ Введите целое число!")
 # Админ-панель
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1238,49 +1211,37 @@ async def admin_reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Обработка админ-действий
+    user_id = update.effective_user.id
+    if not get_user(user_id):
+        await update.message.reply_text("❌ Вы не зарегистрированы. Используйте /start")
+        return
+
+    # 1. Сначала проверяем рулетку
+    if 'roulette_bet_type' in context.user_data:
+        await handle_roulette_bet(update, context)
+        return
+    
+    # 2. Проверяем другие игры
+    if 'current_game' in context.user_data:
+        await handle_bet(update, context)
+        return
+    
+    # 3. Проверяем перевод денег
+    if 'transfer_step' in context.user_data:
+        await handle_transfer(update, context)
+        return
+    
+    # 4. Проверяем админ-действия
     if 'admin_step' in context.user_data:
         step = context.user_data['admin_step']
-        
         if step == 'wait_user_id':
             await admin_process_user_id(update, context)
         elif step == 'wait_amount':
             await admin_process_amount(update, context)
         return
     
-    if 'job' in context.user_data:
-        context.user_data['job'].schedule_removal()
-        del context.user_data['job']
-    
-    # Обработка перевода денег
-    if 'transfer_step' in context.user_data:
-        await handle_transfer(update, context)
-        return
-    
-    # Обработка игровых действий
-    if 'current_game' in context.user_data:
-        await handle_bet(update, context)
-        return
-    
-    if 'transfer_step' in context.user_data:
-        if context.user_data['transfer_step'] == 'wait_recipient':
-            await handle_transfer_recipient(update, context)
-        elif context.user_data['transfer_step'] == 'wait_amount':
-            await handle_transfer_amount(update, context)
-        return
-    if 'roulette_bet_type' in context.user_data:
-        await handle_roulette_bet(update, context)
-        return
-    
-    # Обработка других игр
-    if 'current_game' in context.user_data:
-        await handle_bet(update, context)
-        return
-    # Общие команды
-    if update.message.text == '👑 Админка' and update.effective_user.id in ADMIN_IDS:
-        await admin_panel(update, context)
-    else:
-        await menu(update, context)
+    # 5. Общие команды
+    await menu(update, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1288,34 +1249,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     data = query.data
     
-    if data == 'back_to_menu':
+    if data == 'game_dice':
+        context.user_data.clear()  # Очищаем предыдущий контекст
+        context.user_data['current_game'] = 'dice'
+        await game_dice_menu(update, context)
+    
+    elif data == 'game_slots':
+        context.user_data.clear()
+        context.user_data['current_game'] = 'slots'
+        await game_slots_menu(update, context)
+    
+    elif data == 'game_roulette':
+        context.user_data.clear()
+        context.user_data['current_game'] = 'roulette'
+        await game_roulette_menu(update, context)
+    elif data == 'back_to_menu':
         await menu(update, context)
     elif data == 'games_menu':
         await games_menu(update, context)
     elif data == 'users_menu':
         await users_menu(update, context)
-    elif data == 'game_dice':
-        context.user_data['current_game'] = 'dice'
-        await game_dice_menu(update, context)
-        if context.job_queue:
-            job = context.job_queue.run_once(
-                timeout_callback, 
-                60, 
-                chat_id=update.effective_chat.id,
-                name=str(update.effective_user.id)
-            )
-            context.user_data['job'] = job
-    elif data == 'game_slots':
-        context.user_data['current_game'] = 'slots'
-        await game_slots_menu(update, context)
-        if context.job_queue:
-            job = context.job_queue.run_once(
-                timeout_callback, 
-                60, 
-                chat_id=update.effective_chat.id,
-                name=str(update.effective_user.id)
-            )
-            context.user_data['job'] = job
     elif data == 'balance':
         await balance(update, context)
     elif data == 'admin_panel':
@@ -1351,13 +1304,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 name=str(update.effective_user.id)
             )
             context.user_data['job'] = job
-    elif data == 'game_roulette':
-        context.user_data['current_game'] = 'roulette'
-        await game_roulette_menu(update, context)
-        # Очищаем предыдущие данные ставок
-        context.user_data.pop('roulette_bet_type', None)
-        context.user_data.pop('roulette_number', None)
-        
     elif data.startswith('roulette_'):
         bet_type = data.split('_')[1]
         context.user_data['roulette_bet_type'] = bet_type
