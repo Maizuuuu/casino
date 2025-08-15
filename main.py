@@ -1076,7 +1076,7 @@ async def admin_add_money_handler(update: Update, context: ContextTypes.DEFAULT_
     
     await query.edit_message_text(
         "💵 ПОПОЛНЕНИЕ БАЛАНСА\n\n"
-        "Введите ID пользователя:",
+        "Введите ID пользователя или @username:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_users')]])
     )
 
@@ -1089,21 +1089,55 @@ async def admin_remove_money_handler(update: Update, context: ContextTypes.DEFAU
     
     await query.edit_message_text(
         "💸 СНЯТИЕ СРЕДСТВ\n\n"
-        "Введите ID пользователя:",
+        "Введите ID пользователя или @username:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_users')]])
     )
 
 async def admin_process_user_id(update: Update, context: CallbackContext):
     try:
-        user_id = int(update.message.text)
-        user_data = get_user(user_id)
+        user_input = update.message.text.strip()
         
-        if not user_data:
-            await update.message.reply_text(
-                "❌ Пользователь с таким ID не найден",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_users')]])
-            )
-            return
+        # Поиск по username
+        if user_input.startswith('@'):
+            username = user_input[1:]
+            conn = sqlite3.connect(DATABASE_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id, first_name, last_name, balance FROM users WHERE username = ?', (username,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if not result:
+                await update.message.reply_text(
+                    f"❌ Пользователь @{username} не найден",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_users')]])
+                )
+                return
+                
+            user_id, first_name, last_name, balance = result
+            user_data = {
+                'user_id': user_id,
+                'first_name': first_name,
+                'last_name': last_name,
+                'balance': balance
+            }
+        else:
+            # Поиск по ID
+            try:
+                user_id = int(user_input)
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Неверный формат. Введите ID (число) или @username",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_users')]])
+                )
+                return
+                
+            user_data = get_user(user_id)
+            if not user_data:
+                await update.message.reply_text(
+                    f"❌ Пользователь с ID {user_id} не найден",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_users')]])
+                )
+                return
         
         context.user_data['admin_user_id'] = user_id
         context.user_data['admin_step'] = 'wait_amount'
@@ -1118,10 +1152,11 @@ async def admin_process_user_id(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_users')]])
         )
         
-    except ValueError:
+    except Exception as e:
+        logger.error(f"Admin user search error: {e}")
         await update.message.reply_text(
-            "❌ Неверный формат ID. Введите число:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_users')]])
+            "❌ Ошибка при обработке запроса",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_users')]])
         )
 
 async def admin_process_amount(update: Update, context: CallbackContext):
@@ -1138,18 +1173,19 @@ async def admin_process_amount(update: Update, context: CallbackContext):
         action = context.user_data['admin_action']
         user_data = get_user(user_id)
         
-        if action == 'remove' and user_data['balance'] < amount:
+        # Убрана проверка баланса при снятии
+        new_balance = user_data['balance'] + (amount if action == 'add' else -amount)
+        
+        # Запрещаем отрицательный баланс
+        if new_balance < 0:
             await update.message.reply_text(
-                f"❌ Недостаточно средств. Максимально можно снять: {user_data['balance']}",
+                "❌ Нельзя установить отрицательный баланс!",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_users')]])
             )
             return
         
-        # Модифицируем баланс
-        new_balance = user_data['balance'] + amount if action == 'add' else user_data['balance'] - amount
         update_balance(user_id, amount if action == 'add' else -amount)
         
-        # Записываем транзакцию
         transaction_type = "admin_add" if action == 'add' else "admin_remove"
         add_transaction(user_id, amount, transaction_type)
         
@@ -1163,7 +1199,6 @@ async def admin_process_amount(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админку", callback_data='admin_panel')]])
         )
         
-        # Очищаем контекст
         context.user_data.pop('admin_action', None)
         context.user_data.pop('admin_step', None)
         context.user_data.pop('admin_user_id', None)
