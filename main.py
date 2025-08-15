@@ -296,6 +296,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🎰 С возвращением, {user.first_name}!\n"
             f"💰 Ваш баланс: {user_data['balance']} монет."
         )
+    await show_disclaimer(update, context, "start")
     await menu(update, context)
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -368,6 +369,51 @@ async def show_rating(update: Update, context: ContextTypes.DEFAULT_TYPE, rating
         title,
         reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, from_handler: str = "start"):
+    disclaimer_text = """
+⚠️ <b>ВНИМАНИЕ: ВИРТУАЛЬНОЕ КАЗИНО</b> ⚠️
+
+Этот бот создан исключительно в развлекательных целях.
+Все игровые деньги являются виртуальными и не имеют реальной ценности.
+Игра не связана с азартными играми на реальные деньги.
+
+Используя этого бота, вы подтверждаете, что:
+- Вам исполнилось 18 лет
+- Вы понимаете виртуальную природу игры
+- Не пытаетесь использовать бот для реальных ставок
+"""
+    keyboard = [[InlineKeyboardButton("✅ Я понимаю", callback_data=f'disclaimer_accept_{from_handler}')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=disclaimer_text,
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+    
+    # Сохраняем ID сообщения для последующего удаления
+    context.user_data['disclaimer_message_id'] = message.message_id
+    
+    # Устанавливаем таймер на удаление
+    context.job_queue.run_once(
+        delete_disclaimer, 
+        10, 
+        chat_id=update.effective_chat.id,
+        name=f"disclaimer_{update.effective_chat.id}"
+    )
+
+async def delete_disclaimer(context: CallbackContext):
+    job = context.job
+    try:
+        await context.bot.delete_message(
+            chat_id=job.chat_id,
+            message_id=context.user_data.get('disclaimer_message_id')
+        )
+        context.user_data.pop('disclaimer_message_id', None)
+    except Exception as e:
+        logger.error(f"Error deleting disclaimer: {e}")
+        
 async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("🎲 Кости", callback_data='game_dice'),
@@ -383,6 +429,10 @@ async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 async def game_roulette_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+    context.user_data['current_game'] = 'roulette'
+    await show_disclaimer(update, context, "game")
+
     keyboard = [
         [InlineKeyboardButton("🔴 Красное", callback_data='roulette_red'),
          InlineKeyboardButton("⚫ Черное", callback_data='roulette_black')],
@@ -462,7 +512,7 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
             
         response += f"🎡 {result}\n"
         response += f"💰 Ваш баланс: {user_data['balance'] + (payout - bet_amount) if win else user_data['balance'] - bet_amount}"
-        
+
         # Кнопка для повторной игры
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎡 Играть снова", callback_data='game_roulette')]])
         await update.message.reply_text(response, reply_markup=keyboard)
@@ -875,6 +925,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
 
 async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+    context.user_data['current_game'] = 'dice'
+    await show_disclaimer(update, context, "game")
+
     keyboard = [
         [InlineKeyboardButton("1", callback_data='dice_1'),
          InlineKeyboardButton("2", callback_data='dice_2'),
@@ -898,6 +952,10 @@ async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 async def game_slots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+    context.user_data['current_game'] = 'slots'
+    await show_disclaimer(update, context, "game")
+
     keyboard = [
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
     ]
@@ -1357,6 +1415,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     data = query.data
     
+    if data.startswith('disclaimer_accept_'):
+        # Удаляем таймер
+        current_jobs = context.job_queue.get_jobs_by_name(f"disclaimer_{query.message.chat_id}")
+        for job in current_jobs:
+            job.schedule_removal()
+        
+        # Удаляем сообщение
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.error(f"Error deleting disclaimer: {e}")
+        
+        # Переходим в соответствующее меню
+        from_handler = data.split('_')[2]
+        if from_handler == "start":
+            await menu(update, context)
+        elif from_handler == "game":
+            game_type = context.user_data.get('current_game')
+            if game_type == 'dice':
+                await game_dice_menu(update, context)
+            elif game_type == 'slots':
+                await game_slots_menu(update, context)
+            elif game_type == 'roulette':
+                await game_roulette_menu(update, context)
+        return
+    
     if data == 'game_dice':
         context.user_data.clear()  # Очищаем предыдущий контекст
         context.user_data['current_game'] = 'dice'
@@ -1502,8 +1586,9 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("balance", balance))
-    application.add_handler(CommandHandler("admin", admin_panel))  # Добавлено
+    application.add_handler(CommandHandler("admin", admin_panel))
     
+    # Обработчик должен быть первым, чтобы ловить callback_query от дисклеймера
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
