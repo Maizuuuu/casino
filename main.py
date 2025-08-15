@@ -302,6 +302,47 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=reply_markup
         )
 
+async def rating_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = [
+        [InlineKeyboardButton("🏆 Топ по балансу", callback_data='rating_balance')],
+        [InlineKeyboardButton("💎 Топ по выигрышам", callback_data='rating_profit')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='users_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "📊 Рейтинги игроков:",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            "📊 Рейтинги игроков:",
+            reply_markup=reply_markup
+        )
+
+async def show_rating(update: Update, context: ContextTypes.DEFAULT_TYPE, rating_type: str) -> None:
+    if rating_type == 'balance':
+        top_users = get_top_balance()
+        title = "🏆 Топ-15 по балансу:\n\n"
+        for i, user in enumerate(top_users, 1):
+            title += f"{i}. {user['first_name']} {user['last_name'] or ''} (@{user['username'] or 'нет'}) - {user['balance']} монет\n"
+    else:
+        top_users = get_top_profit()
+        title = "💎 Топ-15 по чистому выигрышу:\n\n"
+        for i, user in enumerate(top_users, 1):
+            title += f"{i}. {user['first_name']} {user['last_name'] or ''} (@{user['username'] or 'нет'}) - {user['profit']} монет\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Топ по балансу", callback_data='rating_balance'),
+         InlineKeyboardButton("🔄 Топ по выигрышам", callback_data='rating_profit')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='rating_menu')]
+    ]
+    
+    await update.callback_query.edit_message_text(
+        title,
+        reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("🎲 Кости", callback_data='game_dice'),
@@ -343,28 +384,30 @@ async def game_roulette_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_data = get_user(user_id)
+    
+    if not user_data:
+        await update.message.reply_text("❌ Вы не зарегистрированы. Используйте /start")
+        return
+
     text = update.message.text.strip()
     
     try:
-        # Пытаемся преобразовать ввод в число
-        amount_or_number = int(text)
-        
-        # Если это ставка на число (когда тип ставки 'number')
-        if context.user_data['roulette_bet_type'] == 'number':
-            if amount_or_number < 0 or amount_or_number > 36:
+        # Если это выбор числа для ставки (проверяем только когда ожидается число)
+        if context.user_data.get('roulette_bet_type') == 'number' and 'roulette_number' not in context.user_data:
+            number = int(text)
+            if number < 0 or number > 36:
                 await update.message.reply_text("❌ Число должно быть от 0 до 36!")
                 return
                 
-            # Сохраняем выбранное число
-            context.user_data['roulette_number'] = amount_or_number
+            context.user_data['roulette_number'] = number
             await update.message.reply_text(
-                f"🎡 Выбрано число: {amount_or_number}\n"
-                "Введите сумму ставки:"
+                f"🎡 Выбрано число: {number}\n"
+                "Теперь введите сумму ставки:"
             )
             return
-        
-        # Если это сумма ставки
-        bet_amount = amount_or_number
+            
+        # Обработка суммы ставки (здесь НЕ проверяем 0-36)
+        bet_amount = int(text)
         if bet_amount <= 0:
             await update.message.reply_text("❌ Сумма ставки должна быть положительной!")
             return
@@ -407,13 +450,12 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Пожалуйста, введите число!")
 
 async def users_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_data = get_user(update.effective_user.id)
-    
     keyboard = [
         [InlineKeyboardButton("💸 Перевести деньги", callback_data='transfer_money')],
+        [InlineKeyboardButton("📊 Рейтинги", callback_data='rating_menu')],  # Добавлено
     ]
     
-    if user_data and user_data['is_admin']:
+    if get_user(update.effective_user.id)['is_admin']:
         keyboard.append([InlineKeyboardButton("👑 Админка", callback_data='admin_panel')])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')])
@@ -430,16 +472,6 @@ async def users_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             '👤 Меню пользователей:',
             reply_markup=reply_markup
         )
-    
-    # Устанавливаем таймаут только если есть job_queue
-    if context.job_queue:
-        job = context.job_queue.run_once(
-            timeout_callback, 
-            60, 
-            chat_id=update.effective_chat.id,
-            name=str(update.effective_user.id)
-        )
-        context.user_data['job'] = job
 
 
 # Новая функция для отображения правил
@@ -1289,6 +1321,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await game_rules(update, context)
     elif data == 'transfer_money':
         await transfer_money_menu(update, context)
+    elif data == 'rating_menu':
+        await rating_menu(update, context)
+    elif data == 'rating_balance':
+        await show_rating(update, context, 'balance')
+    elif data == 'rating_profit':
+        await show_rating(update, context, 'profit')
     elif data.startswith('dice_'):
         guess = int(data.split('_')[1])
         context.user_data['dice_guess'] = guess
@@ -1321,6 +1359,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='game_roulette')]])
             )
 
+def get_top_balance(limit=15) -> List[Dict]:
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT user_id, username, first_name, last_name, balance 
+        FROM users 
+        ORDER BY balance DESC 
+        LIMIT ?
+    ''', (limit,))
+    users = cursor.fetchall()
+    conn.close()
+    
+    return [{
+        'user_id': user[0],
+        'username': user[1],
+        'first_name': user[2],
+        'last_name': user[3],
+        'balance': user[4]
+    } for user in users]
+
+def get_top_profit(limit=15) -> List[Dict]:
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT u.user_id, u.username, u.first_name, u.last_name,
+               COALESCE(SUM(CASE WHEN t.transaction_type = 'win' THEN t.amount ELSE 0 END), 0) -
+               COALESCE(SUM(CASE WHEN t.transaction_type = 'loss' THEN t.amount ELSE 0 END), 0) as profit
+        FROM users u
+        LEFT JOIN transactions t ON u.user_id = t.user_id
+        GROUP BY u.user_id
+        ORDER BY profit DESC
+        LIMIT ?
+    ''', (limit,))
+    users = cursor.fetchall()
+    conn.close()
+    
+    return [{
+        'user_id': user[0],
+        'username': user[1],
+        'first_name': user[2],
+        'last_name': user[3],
+        'profit': user[4]
+    } for user in users]
+
 def get_bet_type_name(bet_type: str) -> str:
     names = {
         'red': '🔴 Красное',
@@ -1344,7 +1426,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("balance", balance))
-    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("admin", admin_panel))  # Добавлено
     
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
