@@ -108,6 +108,29 @@ def create_user(user_id: int, username: str, first_name: str, last_name: str) ->
     conn.commit()
     conn.close()
 
+async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE, username: str = None) -> None:
+    if username:
+        # Поиск по username
+        if username.startswith('@'):
+            username = username[1:]
+        
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            await update.message.reply_text(f"❌ Пользователь @{username} не найден")
+            return
+            
+        balance = result[0]
+        await update.message.reply_text(f"💰 Баланс @{username}: {balance} монет")
+    else:
+        # Проверка своего баланса
+        user_data = get_user(update.effective_user.id)
+        await update.message.reply_text(f"💰 Ваш баланс: {user_data['balance']} монет")
+
 def update_balance(user_id: int, amount: int) -> None:
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -242,10 +265,11 @@ async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list]:
     reels = [random.choice(symbols) for _ in range(3)]
     
     if reels[0] == reels[1] == reels[2]:
-        win_amount = int(bet_amount * coefficient * (3 if reels[0] == '7' else 1))
+        win_coefficient = 3 if reels[0] == '7' else 1
+        win_amount = int(bet_amount * coefficient * win_coefficient)
         update_balance(user_id, win_amount)
-        add_transaction(user_id, win_amount, "win", "slots", f"reels:{''.join(reels)},coef:{coefficient:.2f}")
-        return True, coefficient, reels
+        add_transaction(user_id, win_amount, "win", "slots", f"reels:{''.join(reels)},coef:{coefficient:.2f}x{win_coefficient}")
+        return True, coefficient * win_coefficient, reels
     elif reels[0] == reels[1] or reels[1] == reels[2]:
         win_amount = int(bet_amount * 0.5)
         update_balance(user_id, win_amount)
@@ -255,6 +279,7 @@ async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list]:
     update_balance(user_id, -bet_amount)
     add_transaction(user_id, -bet_amount, "loss", "slots", f"reels:{''.join(reels)},coef:{coefficient:.2f}")
     return False, coefficient, reels
+
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -842,6 +867,11 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"💰 Баланс: {user_data['balance']} монет",
             reply_markup=reply_markup
         )
+
+    if context.args:
+        await check_balance(update, context, context.args[0])
+    else:
+        await check_balance(update, context)
     
 
 async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -909,13 +939,14 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             won, coefficient, roll = await play_dice(user_id, bet_amount, guess)
             
             response = (
-                f"🎉 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
-                f"🎲 Выпало: {roll} (ставка: {guess})\n"
-                f"📈 Коэф: {coefficient:.2f}x\n"
-                if won else
-                f"❌ Проигрыш: {bet_amount} монет\n"
-                f"🎲 Выпало: {roll} (ставка: {guess})\n"
-            )
+    f"🎉 Поздравляем! Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
+    f"🎲 Выпало: {roll} (ставка: {guess})\n"
+    f"📈 Коэф: {coefficient:.2f}x\n"
+    if won else
+    f"❌ Проигрыш: {bet_amount} монет\n"
+    f"🎲 Выпало: {roll} (ставка: {guess})\n"
+    f"📈 Коэф был: {coefficient:.2f}x\n"
+)
             
         elif game_type == 'slots':
             won, coefficient, reels = await play_slots(user_id, bet_amount)
@@ -929,11 +960,13 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 response = (
                     f"{win_text}\n🎰 {' '.join(reels)}\n"
                     f"💰 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
+                    f"📈 Коэф был: {coefficient:.2f}x\n"
                 )
             else:
                 response = (
                     f"❌ Проигрыш: {bet_amount} монет\n"
                     f"🎰 {' '.join(reels)}\n"
+                    f"📈 Коэф был: {coefficient:.2f}x\n"
                 )
         
         # Общий вывод для всех игр
@@ -1210,7 +1243,7 @@ async def admin_process_amount(update: Update, context: CallbackContext):
         )
 
 async def admin_wait_for_user_id(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
+    query = update.callback_query   
     await query.answer()
     
     user = get_user(update.effective_user.id)
@@ -1286,6 +1319,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 1. Сначала проверяем рулетку
     if 'roulette_bet_type' in context.user_data:
         await handle_roulette_bet(update, context)
+        return
+    
+    if update.message.text.startswith('/balance'):
+        parts = update.message.text.split()
+        if len(parts) > 1:
+            await check_balance(update, context, parts[1])
+        else:
+            await check_balance(update, context)
         return
     
     # 2. Проверяем другие игры
