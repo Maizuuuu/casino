@@ -59,6 +59,39 @@ def init_db():
         timestamp TEXT,
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )''')
+
+        # В init_db() добавляем:
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        multiplier REAL,
+        fixed_win INTEGER,
+        discount INTEGER,
+        attempts INTEGER,  # -1 для бесконечных
+        expires_at TEXT,
+        created_by INTEGER,
+        FOREIGN KEY (created_by) REFERENCES users(user_id)
+    )''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS promocodes (
+        code TEXT PRIMARY KEY,
+        bonus_amount INTEGER NOT NULL,
+        expires_at TEXT,
+        created_by INTEGER,
+        FOREIGN KEY (created_by) REFERENCES users(user_id)
+    )''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS used_promocodes (
+        user_id INTEGER,
+        code TEXT,
+        PRIMARY KEY (user_id, code),
+        FOREIGN KEY (user_id) REFERENCES users(user_id),
+        FOREIGN KEY (code) REFERENCES promocodes(code)
+    )''')
     
     for admin_id in ADMIN_IDS:
         cursor.execute('SELECT * FROM users WHERE user_id = ?', (admin_id,))
@@ -77,6 +110,50 @@ def init_db():
     conn.close()
 
 init_db()
+
+def add_event(name: str, description: str, event_type: str, value: float, 
+              attempts: int, days_active: int, admin_id: int) -> bool:
+    expires_at = (datetime.now() + timedelta(days=days_active)).isoformat()
+    
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    try:
+        if event_type == "multiplier":
+            cursor.execute('''
+                INSERT INTO events (name, description, multiplier, attempts, expires_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, description, value, attempts, expires_at, admin_id))
+        elif event_type == "fixed_win":
+            cursor.execute('''
+                INSERT INTO events (name, description, fixed_win, attempts, expires_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, description, int(value), attempts, expires_at, admin_id))
+        elif event_type == "discount":
+            cursor.execute('''
+                INSERT INTO events (name, description, discount, attempts, expires_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, description, int(value), attempts, expires_at, admin_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding event: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_active_events() -> list:
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM events 
+        WHERE expires_at > datetime('now')
+        ORDER BY expires_at ASC
+    ''')
+    events = cursor.fetchall()
+    conn.close()
+    return events
 
 # Функции работы с базой данных
 def get_user(user_id: int) -> Dict:
@@ -97,6 +174,43 @@ def get_user(user_id: int) -> Dict:
             'is_admin': bool(user[6])
         }
     return None
+
+def get_admin_name(admin_id: int) -> str:
+    """Получаем имя администратора по ID"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT first_name, last_name FROM users WHERE user_id = ?', (admin_id,))
+    admin = cursor.fetchone()
+    conn.close()
+    
+    if admin:
+        return f"{admin[0]} {admin[1] or ''}".strip()
+    return "Неизвестный"
+
+def get_active_events_for_game(game_type: str) -> list:
+    """Получаем активные события для конкретного типа игры"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    # Для слотов применяем скидки, для других игр - множители/фиксированные бонусы
+    if game_type == "slots":
+        cursor.execute('''
+            SELECT * FROM events 
+            WHERE expires_at > datetime('now') 
+            AND (discount > 0 OR multiplier > 1)
+            ORDER BY expires_at ASC
+        ''')
+    else:
+        cursor.execute('''
+            SELECT * FROM events 
+            WHERE expires_at > datetime('now') 
+            AND (multiplier > 1 OR fixed_win > 0)
+            ORDER BY expires_at ASC
+        ''')
+    
+    events = cursor.fetchall()
+    conn.close()
+    return events
 
 def create_user(user_id: int, username: str, first_name: str, last_name: str) -> None:
     is_admin = 1 if user_id in ADMIN_IDS else 0
@@ -288,7 +402,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not get_user(user.id):
         create_user(user.id, user.username, user.first_name, user.last_name)
         await update.message.reply_text(
-            f"🎰 Добро пожаловать в Lucky Casino, {user.first_name}!\n"
+            f"🎰 Добро пожаловать в Lucky Azart, {user.first_name}!\n"
             f"💰 Ваш стартовый баланс: {INITIAL_BALANCE} монет."
         )
     else:
@@ -307,10 +421,11 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     keyboard = [
         [InlineKeyboardButton("🎮 Игры", callback_data='games_menu')],
+        [InlineKeyboardButton("🎉 События", callback_data='events_menu')],  # Новая кнопка
         [InlineKeyboardButton("💰 Баланс", callback_data='balance')],
         [InlineKeyboardButton("👤 Пользователи", callback_data='users_menu')],
     ]
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # Очищаем таймер, если он был
@@ -328,6 +443,168 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             '🎰 Главное меню:',
             reply_markup=reply_markup
         )
+
+# В menu.py
+async def events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_active_events()
+    
+    if not events:
+        await update.callback_query.edit_message_text(
+            "🎉 На данный момент нет активных событий",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]
+            ])
+        )
+        return
+
+    keyboard = []
+    for event in events:
+        event_info = format_event_info(event)
+        keyboard.append([InlineKeyboardButton(
+            f"{event[1]} (до {event[7][:10]})", 
+            callback_data=f'event_{event[0]}'
+        )])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')])
+    
+    await update.callback_query.edit_message_text(
+        "🎁 Активные события:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def format_event_info(event: tuple) -> str:
+    info = f"<b>{event[1]}</b>\n{event[2]}\n\n"
+    if event[3]:
+        info += f"📈 Коэффициент: x{event[3]}\n"
+    elif event[4]:
+        info += f"💰 Фиксированный выигрыш: +{event[4]} монет\n"
+    elif event[5]:
+        info += f"🎫 Скидка: {event[5]}% на крутки\n"
+    
+    info += f"🔄 Попыток: {'∞' if event[6] == -1 else event[6]}\n"
+    info += f"⏳ До: {event[7][:10]}\n"
+    info += f"👤 Создал: {get_admin_name(event[8])}"
+    return info
+
+# В admin.py
+async def admin_events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить событие", callback_data='admin_add_event')],
+        [InlineKeyboardButton("✏️ Редактировать события", callback_data='admin_edit_events')],
+        [InlineKeyboardButton("🎫 Промокоды", callback_data='admin_promocodes')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
+    ]
+    
+    await update.callback_query.edit_message_text(
+        "🛠 Управление событиями:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def admin_add_event_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📈 Коэффициент", callback_data='add_event_multiplier')],
+        [InlineKeyboardButton("💰 Фиксированный выигрыш", callback_data='add_event_fixed')],
+        [InlineKeyboardButton("🎫 Скидка на крутки", callback_data='add_event_discount')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
+    ]
+    
+    await update.callback_query.edit_message_text(
+        "Выберите тип события:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# promocodes.py
+def add_promocode(code: str, amount: int, days: int, admin_id: int) -> bool:
+    expires_at = (datetime.now() + timedelta(days=days)).isoformat()
+    
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO promocodes (code, bonus_amount, expires_at, created_by)
+            VALUES (?, ?, ?, ?)
+        ''', (code.upper(), amount, expires_at, admin_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+async def use_promocode(user_id: int, code: str) -> tuple:
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    try:
+        # Проверяем существует ли промокод
+        cursor.execute('''
+            SELECT bonus_amount FROM promocodes 
+            WHERE code = ? AND expires_at > datetime('now')
+        ''', (code.upper(),))
+        promocode = cursor.fetchone()
+        
+        if not promocode:
+            return (False, "Промокод не найден или истёк")
+        
+        # Проверяем не использовал ли уже пользователь
+        cursor.execute('''
+            SELECT 1 FROM used_promocodes 
+            WHERE user_id = ? AND code = ?
+        ''', (user_id, code.upper()))
+        
+        if cursor.fetchone():
+            return (False, "Вы уже использовали этот промокод")
+        
+        # Зачисляем бонус
+        update_balance(user_id, promocode[0])
+        
+        # Фиксируем использование
+        cursor.execute('''
+            INSERT INTO used_promocodes (user_id, code)
+            VALUES (?, ?)
+        ''', (user_id, code.upper()))
+        
+        conn.commit()
+        return (True, f"Получено {promocode[0]} монет!")
+    finally:
+        conn.close()
+
+# В game_mechanics.py
+def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
+    events = get_active_events_for_game(game_type)
+    bonuses = {
+        'multiplier': 1.0,
+        'fixed_bonus': 0,
+        'discount': 0
+    }
+    
+    for event in events:
+        # Уменьшаем количество попыток
+        if event[6] > 0:  # Если не бесконечные попытки
+            decrease_event_attempts(event[0])
+        
+        if event[3]:  # Multiplier
+            bonuses['multiplier'] *= event[3]
+        elif event[4]:  # Fixed win
+            bonuses['fixed_bonus'] += event[4]
+        elif event[5]:  # Discount
+            bonuses['discount'] = max(bonuses['discount'], event[5])
+    
+    return (bet_amount, bonuses)
+
+def decrease_event_attempts(event_id: int):
+    """Уменьшаем количество оставшихся попыток"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE events 
+        SET attempts = attempts - 1 
+        WHERE event_id = ? AND attempts > 0
+    ''', (event_id,))
+    conn.commit()
+    conn.close()
+
 
 async def rating_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
@@ -382,9 +659,36 @@ async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, fr
             logger.error(f"Ошибка удаления предыдущего дисклеймера: {e}")
 
     disclaimer_text = """
-⚠️ <b>ВНИМАЛЬНО: ВИРТУАЛЬНОЕ КАЗИНО</b> ⚠️
+⚠️ <b>ВАЖНАЯ ИНФОРМАЦИЯ</b> ⚠️
 
-Это развлекательный бот без реальных ставок.
+Этот Telegram-бот <b>"Lucky Azart"</b> является исключительно <b>развлекательным приложением</b> и <b>не имеет отношения к реальным азартным играм</b>.
+
+<b>▫️ Основные положения:</b>
+• Все "ставки" совершаются с использованием виртуальной игровой валюты
+• Никакие реальные деньги не принимаются и не выплачиваются
+• Бот не является азартной игрой в юридическом смысле
+
+<b>▫️ Юридический статус:</b>
+• Не требует лицензии на азартные игры
+• Не проводит денежные транзакции
+• Не принимает депозиты и не выплачивает выигрыши
+
+<b>▫️ Для пользователей из разных стран:</b>
+• <b>РФ:</b> Соответствует ФЗ-244 "О государственном регулировании азартных игр"
+• <b>ЕС:</b> Не подпадает под Директиву 2014/62/EU об азартных играх
+• <b>США:</b> Не нарушает UIGEA (Unlawful Internet Gambling Enforcement Act)
+
+<b>▫️ Ограничения:</b>
+• Запрещено использование лицами младше 18 лет
+• Запрещено использование в коммерческих целях
+• Администрация не несёт ответственности за возможную игровую зависимость
+
+Используя этого бота, вы подтверждаете, что:
+1. Понимаете виртуальную природу "ставок"
+2. Не ожидаете реальных денежных выплат
+3. Осознаёте, что это развлекательный сервис
+
+Полный текст пользовательского соглашения доступен по команде /terms
 """
     buttons = [[InlineKeyboardButton("✅ Я понимаю", callback_data=f'disclaim_ok_{from_handler}')]]
     
