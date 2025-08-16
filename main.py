@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import sqlite3
 from typing import Dict, Tuple, List
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -375,15 +376,19 @@ async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, fr
 
 Этот бот создан исключительно в развлекательных целях.
 Все игровые деньги являются виртуальными и не имеют реальной ценности.
-Игра не связана с азартными играми на реальные деньги.
-
-Используя этого бота, вы подтверждаете, что:
-- Вам исполнилось 18 лет
-- Вы понимаете виртуальную природу игры
-- Не пытаетесь использовать бот для реальных ставок
 """
     keyboard = [[InlineKeyboardButton("✅ Я понимаю", callback_data=f'disclaimer_accept_{from_handler}')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Удаляем предыдущий дисклеймер если есть
+    if 'disclaimer_message_id' in context.user_data:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=context.user_data['disclaimer_message_id']
+            )
+        except:
+            pass
     
     message = await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -392,27 +397,36 @@ async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, fr
         reply_markup=reply_markup
     )
     
-    # Сохраняем ID сообщения для последующего удаления
+    # Сохраняем ID сообщения и время отправки
     context.user_data['disclaimer_message_id'] = message.message_id
+    context.user_data['disclaimer_time'] = time.time()
     
-    # Устанавливаем таймер на удаление
+    # Устанавливаем таймер на удаление через 10 секунд
     context.job_queue.run_once(
-        delete_disclaimer, 
-        10, 
+        callback=delete_disclaimer_callback,
+        when=10,
         chat_id=update.effective_chat.id,
-        name=f"disclaimer_{update.effective_chat.id}"
+        name=f"disclaimer_{update.effective_chat.id}_{message.message_id}"
     )
 
-async def delete_disclaimer(context: CallbackContext):
+async def delete_disclaimer_callback(context: CallbackContext):
     job = context.job
+    chat_id = job.chat_id
     try:
-        await context.bot.delete_message(
-            chat_id=job.chat_id,
-            message_id=context.user_data.get('disclaimer_message_id')
-        )
-        context.user_data.pop('disclaimer_message_id', None)
+        # Проверяем, не было ли сообщение уже удалено
+        if 'disclaimer_message_id' in context.user_data:
+            message_id = context.user_data['disclaimer_message_id']
+            # Проверяем, что сообщение не было удалено ранее по кнопке
+            if time.time() - context.user_data.get('disclaimer_time', 0) >= 9.5:  # 0.5 сек погрешность
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=message_id
+                )
+                # Чистим данные
+                context.user_data.pop('disclaimer_message_id', None)
+                context.user_data.pop('disclaimer_time', None)
     except Exception as e:
-        logger.error(f"Error deleting disclaimer: {e}")
+        logger.error(f"Ошибка при удалении дисклеймера: {e}")
         
 async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
@@ -928,6 +942,8 @@ async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data['current_game'] = 'dice'
     await show_disclaimer(update, context, "game")
+    # Устанавливаем флаг, что дисклеймер показан
+    context.user_data['disclaimer_shown'] = True    
 
     keyboard = [
         [InlineKeyboardButton("1", callback_data='dice_1'),
@@ -975,7 +991,9 @@ async def game_slots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_data = get_user(user_id)
-    
+    if not context.user_data.get('disclaimer_shown', False):
+        await show_disclaimer(update, context, "game")
+        return
     try:
         bet_amount = int(update.message.text)
         if bet_amount <= 0:
@@ -1415,20 +1433,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     data = query.data
     
-    if data.startswith('disclaimer_accept_'):
-        # Удаляем таймер
-        current_jobs = context.job_queue.get_jobs_by_name(f"disclaimer_{query.message.chat_id}")
+    if query.data.startswith('disclaimer_accept_'):
+        # Удаляем все таймеры для этого чата
+        current_jobs = context.job_queue.get_jobs_by_name(f"disclaimer_{query.message.chat.id}_*")
         for job in current_jobs:
             job.schedule_removal()
         
-        # Удаляем сообщение
+        # Удаляем сообщение дисклеймера
         try:
             await query.message.delete()
         except Exception as e:
-            logger.error(f"Error deleting disclaimer: {e}")
+            logger.error(f"Ошибка при удалении сообщения: {e}")
+        
+        # Чистим данные
+        context.user_data.pop('disclaimer_message_id', None)
+        context.user_data.pop('disclaimer_time', None)
         
         # Переходим в соответствующее меню
-        from_handler = data.split('_')[2]
+        from_handler = query.data.split('_')[2]
         if from_handler == "start":
             await menu(update, context)
         elif from_handler == "game":
@@ -1587,6 +1609,7 @@ def main() -> None:
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Обработчик должен быть первым, чтобы ловить callback_query от дисклеймера
     application.add_handler(CallbackQueryHandler(button_handler))
