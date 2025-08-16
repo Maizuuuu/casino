@@ -408,28 +408,18 @@ async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, fr
         )
 
 async def auto_delete_disclaimer(context: CallbackContext):
-    job = context.job
-    chat_id = job.chat_id
-    user_data = context.user_data
     
-    try:
-        if 'disclaimer_msg_id' not in user_data:
-            return
-            
-        msg_id = user_data['disclaimer_msg_id']
-        post_time = user_data.get('disclaimer_time', 0)
+    if 'disclaimer_msg_id' not in context.user_data:
+        return
         
-        # Удаляем только если прошло ≥9 секунд
-        if time.time() - post_time >= 9:
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=msg_id
-            )
-            # Чистим данные
-            user_data.pop('disclaimer_msg_id', None)
-            user_data.pop('disclaimer_time', None)
-    except Exception as e:
-        logger.error(f"Ошибка автоудаления: {e}")
+    try:
+        await context.bot.delete_message(...)
+    except Exception:
+        pass
+        
+    # Важно: очищаем данные даже если не удалилось сообщение
+    context.user_data.pop('disclaimer_msg_id', None)
+    context.user_data.pop('disclaimer_time', None)
 
 # async def delete_disclaimer_callback(context: CallbackContext):
 #     job = context.job
@@ -965,6 +955,16 @@ async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await show_disclaimer(update, context, "game")
     # Устанавливаем флаг, что дисклеймер показан
     context.user_data['disclaimer_shown'] = True    
+    
+    if context.user_data.get('disclaimer_shown'):
+        # Показываем обычное меню
+        keyboard = [...]  # Ваша клавиатура
+        await update.callback_query.edit_message_text(...)
+        return
+        
+    # Если не был принят - показываем дисклеймер
+    context.user_data['current_game'] = 'dice'
+    await show_disclaimer(update, context, "game")
 
     keyboard = [
         [InlineKeyboardButton("1", callback_data='dice_1'),
@@ -992,6 +992,7 @@ async def game_slots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     context.user_data['current_game'] = 'slots'
     await show_disclaimer(update, context, "game")
+
 
     keyboard = [
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
@@ -1458,10 +1459,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             # Удаляем сообщение с дисклеймером
             await query.message.delete()
-            context.user_data.pop('disclaimer_msg_id', None)
             
-            # Определяем куда переходить после принятия
+            # Очищаем данные дисклеймера
+            context.user_data.pop('disclaimer_msg_id', None)
+            context.user_data.pop('disclaimer_time', None)
+            context.user_data['disclaimer_shown'] = True  # Добавляем флаг
+            
+            # Определяем куда переходить
             target = data.split('_')[-1]
+            
             if target == "start":
                 await menu(update, context)
             elif target == "game":
@@ -1473,8 +1479,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 elif game_type == 'roulette':
                     await game_roulette_menu(update, context)
         except Exception as e:
-            logger.error(f"Ошибка обработки дисклеймера: {e}")
-        return
+            logger.error(f"Ошибка при обработке дисклеймера: {e}")
+            return
     
     # 2. Главное меню
     elif data == 'back_to_menu':
