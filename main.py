@@ -34,28 +34,26 @@ INITIAL_BALANCE = 1000
 
 # Инициализация базы данных
 def init_db():
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-
+        
         # Включаем поддержку внешних ключей
         cursor.execute("PRAGMA foreign_keys = ON")
-
-        # Создаем таблицы, если они не существуют
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+        
+        # Создаем таблицы
+        tables = [
+            '''CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
                 balance INTEGER DEFAULT 1000,
                 registration_date TEXT,
-                is_admin INTEGER DEFAULT 0
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
+                is_admin INTEGER DEFAULT 0)''',
+                
+            '''CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 amount INTEGER,
@@ -63,12 +61,9 @@ def init_db():
                 game_type TEXT,
                 result TEXT,
                 timestamp TEXT,
-                FOREIGN KEY (user_id) REFERENCES users (user_id)
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS events (
+                FOREIGN KEY (user_id) REFERENCES users(user_id))''',
+                
+            '''CREATE TABLE IF NOT EXISTS events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL,
@@ -78,47 +73,37 @@ def init_db():
                 attempts INTEGER,
                 expires_at TEXT,
                 created_by INTEGER,
-                FOREIGN KEY (created_by) REFERENCES users(user_id)
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS promocodes (
+                FOREIGN KEY (created_by) REFERENCES users(user_id))''',
+                
+            '''CREATE TABLE IF NOT EXISTS promocodes (
                 code TEXT PRIMARY KEY,
                 bonus_amount INTEGER NOT NULL,
                 expires_at TEXT,
                 created_by INTEGER,
-                FOREIGN KEY (created_by) REFERENCES users(user_id)
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS used_promocodes (
+                FOREIGN KEY (created_by) REFERENCES users(user_id))''',
+                
+            '''CREATE TABLE IF NOT EXISTS used_promocodes (
                 user_id INTEGER,
                 code TEXT,
                 PRIMARY KEY (user_id, code),
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
-                FOREIGN KEY (code) REFERENCES promocodes(code)
-            )
-        ''')
-
+                FOREIGN KEY (code) REFERENCES promocodes(code))'''
+        ]
+        
+        for table in tables:
+            cursor.execute(table)
+        
         # Добавляем администраторов
         for admin_id in ADMIN_IDS:
-            # Проверяем существование администратора
-            cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (admin_id,))
-            if not cursor.fetchone():
-                cursor.execute(
-                    'INSERT INTO users (user_id, is_admin, registration_date) VALUES (?, ?, ?)',
-                    (admin_id, 1, datetime.now().isoformat())
-                )
-
+            cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, registration_date) VALUES (?, ?, ?)',
+                          (admin_id, 1, datetime.now().isoformat()))
+        
         conn.commit()
     except sqlite3.Error as e:
-        print(f"Ошибка при инициализации базы данных: {e}")
-        raise  # Перебрасываем исключение для обработки выше
+        print(f"Database error: {e}")
     finally:
         if conn:
-            conn.close()
+            conn.close()    
 
 init_db()
 
@@ -457,9 +442,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # В menu.py
 async def events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    events = get_active_events()
+    active_events = get_active_events()  # Реализовать аналогично get_all_events()
     
-    if not events:
+    if not active_events:
         await update.callback_query.edit_message_text(
             "🎉 На данный момент нет активных событий",
             reply_markup=InlineKeyboardMarkup([
@@ -467,14 +452,11 @@ async def events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return
-
+    
     keyboard = []
-    for event in events:
-        event_info = format_event_info(event)
-        keyboard.append([InlineKeyboardButton(
-            f"{event[1]} (до {event[7][:10]})", 
-            callback_data=f'event_{event[0]}'
-        )])
+    for event in active_events:
+        btn_text = f"{event['name']} - До {event['expires_at'][:10]}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_event_{event['id']}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')])
     
@@ -580,6 +562,63 @@ async def use_promocode(user_id: int, code: str) -> tuple:
         return (True, f"Получено {promocode[0]} монет!")
     finally:
         conn.close()
+
+async def admin_events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить событие", callback_data='admin_add_event')],
+        [InlineKeyboardButton("✏️ Изменить события", callback_data='admin_edit_events')],
+        [InlineKeyboardButton("❌ Удалить событие", callback_data='admin_delete_event')],
+        [InlineKeyboardButton("🎫 Управление промокодами", callback_data='admin_promocodes')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
+    ]
+    await update.callback_query.edit_message_text(
+        "🛠 Управление событиями и промокодами:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def admin_edit_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_all_events()  # Нужно реализовать эту функцию
+    if not events:
+        await update.callback_query.edit_message_text(
+            "Нет активных событий для редактирования",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
+            ])
+        )
+        return
+    
+    keyboard = []
+    for event in events:
+        keyboard.append([InlineKeyboardButton(
+            f"{event['name']} (ID: {event['id']})", 
+            callback_data=f"edit_event_{event['id']}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_events')])
+    
+    await update.callback_query.edit_message_text(
+        "Выберите событие для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def get_all_events():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM events')
+    events = []
+    for row in cursor.fetchall():
+        events.append({
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'multiplier': row[3],
+            'fixed_win': row[4],
+            'discount': row[5],
+            'attempts': row[6],
+            'expires_at': row[7],
+            'created_by': row[8]
+        })
+    conn.close()
+    return events
 
 # В game_mechanics.py
 def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
@@ -1946,7 +1985,10 @@ def main() -> None:
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+    application.add_handler(CallbackQueryHandler(admin_events_menu, pattern='^admin_events$'))
+    application.add_handler(CallbackQueryHandler(admin_edit_events, pattern='^admin_edit_events$'))
+    application.add_handler(CallbackQueryHandler(events_menu, pattern='^events_menu$'))
+
     application.run_polling()
 
 if __name__ == '__main__':
