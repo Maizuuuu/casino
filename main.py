@@ -456,9 +456,6 @@ async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def game_roulette_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
-    context.user_data['current_game'] = 'roulette'
-    await show_disclaimer(update, context, "game")
-
     keyboard = [
         [InlineKeyboardButton("🔴 Красное", callback_data='roulette_red'),
          InlineKeyboardButton("⚫ Черное", callback_data='roulette_black')],
@@ -951,20 +948,6 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
 
 async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data['game_type'] = 'dice'
-    await show_disclaimer(update, context, "game")
-    # Устанавливаем флаг, что дисклеймер показан
-    context.user_data['disclaimer_shown'] = True    
-    
-    if context.user_data.get('disclaimer_shown'):
-        # Показываем обычное меню
-        keyboard = [...]  # Ваша клавиатура
-        await update.callback_query.edit_message_text(...)
-        return
-        
-    # Если не был принят - показываем дисклеймер
-    context.user_data['current_game'] = 'dice'
-    await show_disclaimer(update, context, "game")
 
     keyboard = [
         [InlineKeyboardButton("1", callback_data='dice_1'),
@@ -989,10 +972,6 @@ async def game_dice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 async def game_slots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-
-    context.user_data['current_game'] = 'slots'
-    await show_disclaimer(update, context, "game")
-
 
     keyboard = [
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
