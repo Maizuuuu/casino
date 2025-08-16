@@ -382,31 +382,30 @@ async def show_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE, fr
             logger.error(f"Ошибка удаления предыдущего дисклеймера: {e}")
 
     disclaimer_text = """
-⚠️ <b>ВНИМАНИЕ: ВИРТУАЛЬНОЕ КАЗИНО</b> ⚠️
+⚠️ <b>ВНИМАЛЬНО: ВИРТУАЛЬНОЕ КАЗИНО</b> ⚠️
 
-Этот бот создан исключительно в развлекательных целях.
-Все деньги и ставки - виртуальные.
+Это развлекательный бот без реальных ставок.
 """
     buttons = [[InlineKeyboardButton("✅ Я понимаю", callback_data=f'disclaim_ok_{from_handler}')]]
     
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+    msg = await update.effective_message.reply_text(
         text=disclaimer_text,
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode='HTML'
     )
     
-    # Сохраняем ID сообщения и время
+    # Сохраняем только ID сообщения
     context.user_data['disclaimer_msg_id'] = msg.message_id
     context.user_data['disclaimer_time'] = time.time()
     
-    # Добавляем таймер
-    context.job_queue.run_once(
-        callback=auto_delete_disclaimer,
-        when=10,
-        chat_id=update.effective_chat.id,
-        name=f"disclaim_{update.effective_chat.id}"
-    )
+    # Устанавливаем таймер только если есть job_queue
+    if context.job_queue:
+        context.job_queue.run_once(
+            callback=auto_delete_disclaimer,
+            when=10,
+            chat_id=update.effective_chat.id,
+            name=f"disclaim_{msg.message_id}"
+        )
 
 async def auto_delete_disclaimer(context: CallbackContext):
     job = context.job
@@ -1455,46 +1454,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     data = query.data
     
-    if query.data.startswith('disclaim_ok_'):
-        # Удаляем все таймеры для этого чата
-        for job in context.job_queue.get_jobs_by_name(f"disclaim_{query.message.chat.id}"):
-            job.schedule_removal()
-        
-        # Удаляем сообщение
+    if data.startswith('disclaim_ok_'):
         try:
+            # Удаляем сообщение с дисклеймером
             await query.message.delete()
             context.user_data.pop('disclaimer_msg_id', None)
-            context.user_data.pop('disclaimer_time', None)
+            
+            # Определяем куда переходить после принятия
+            target = data.split('_')[-1]
+            if target == "start":
+                await menu(update, context)
+            elif target == "game":
+                game_type = context.user_data.get('current_game')
+                if game_type == 'dice':
+                    await game_dice_menu(update, context)
+                elif game_type == 'slots':
+                    await game_slots_menu(update, context)
+                elif game_type == 'roulette':
+                    await game_roulette_menu(update, context)
         except Exception as e:
-            logger.error(f"Ошибка удаления: {e}")
-        
-        # Переход в нужное меню
-        target = query.data.split('_')[-1]
-        if target == "start":
-            await menu(update, context)
-        elif target == "game":
-            game_type = context.user_data.get('game_type')
-            if game_type == 'dice':
-                await game_dice_menu(update, context)
+            logger.error(f"Ошибка обработки дисклеймера: {e}")
+        return
     
-    if data == 'game_dice':
-        context.user_data.clear()  # Очищаем предыдущий контекст
-        context.user_data['current_game'] = 'dice'
-        await game_dice_menu(update, context)
-    
-    elif data == 'game_slots':
-        context.user_data.clear()
-        context.user_data['current_game'] = 'slots'
-        await game_slots_menu(update, context)
-    
-    elif data == 'game_roulette':
-        context.user_data.clear()
-        context.user_data['current_game'] = 'roulette'
-        await game_roulette_menu(update, context)
+    # 2. Главное меню
     elif data == 'back_to_menu':
         await menu(update, context)
+    
+    # 3. Меню игр
     elif data == 'games_menu':
         await games_menu(update, context)
+    
+    # 4. Игра в кости
+    elif data.startswith('dice_'):
+        guess = int(data.split('_')[1])
+        context.user_data['dice_guess'] = guess
+        await query.edit_message_text(
+            f"🎲 Выбрано число: {guess}\nОтправьте сумму ставки в чат.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data='game_dice')]
+            ])
+        )
+    
+    # 5. Меню пользователей
+    elif data == 'users_menu':
+        await users_menu(update, context)
+    
+    # 6. Админ-панель
+    elif data == 'admin_panel':
+        user = get_user(update.effective_user.id)
+        if user and user['is_admin']:
+            await admin_panel(update, context)
+        else:
+            await query.answer("❌ У вас нет прав доступа", show_alert=True)
+    
     elif data == 'users_menu':
         await users_menu(update, context)
     elif data == 'balance':
