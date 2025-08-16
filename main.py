@@ -1451,7 +1451,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    
+    logger.info(f"Received callback_data: {query.data}")  # Логируем
     data = query.data
     
     if data.startswith('disclaim_ok_'):
@@ -1498,7 +1498,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 5. Меню пользователей
     elif data == 'users_menu':
         await users_menu(update, context)
-    
+    elif data == 'game_dice':
+        context.user_data['current_game'] = 'dice'
+        await game_dice_menu(update, context)
+    elif data == 'game_slots':
+        context.user_data['current_game'] = 'slots'
+        await game_slots_menu(update, context)
+    elif data == 'game_roulette':
+        context.user_data['current_game'] = 'roulette'
+        await game_roulette_menu(update, context)
     # 6. Админ-панель
     elif data == 'admin_panel':
         user = get_user(update.effective_user.id)
