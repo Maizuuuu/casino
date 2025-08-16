@@ -34,93 +34,91 @@ INITIAL_BALANCE = 1000
 
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    # Убираем все комментарии из SQL-запросов
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            balance INTEGER DEFAULT 1000,
-            registration_date TEXT,
-            is_admin INTEGER DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            amount INTEGER,
-            transaction_type TEXT,
-            game_type TEXT,
-            result TEXT,
-            timestamp TEXT,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS events (
-            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            multiplier REAL,
-            fixed_win INTEGER,
-            discount INTEGER,
-            attempts INTEGER,
-            expires_at TEXT,
-            created_by INTEGER,
-            FOREIGN KEY (created_by) REFERENCES users(user_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS promocodes (
-            code TEXT PRIMARY KEY,
-            bonus_amount INTEGER NOT NULL,
-            expires_at TEXT,
-            created_by INTEGER,
-            FOREIGN KEY (created_by) REFERENCES users(user_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS used_promocodes (
-            user_id INTEGER,
-            code TEXT,
-            PRIMARY KEY (user_id, code),
-            FOREIGN KEY (user_id) REFERENCES users(user_id),
-            FOREIGN KEY (code) REFERENCES promocodes(code)
-        )
-    ''')
-    
-    # Добавляем администраторов
-    for admin_id in ADMIN_IDS:
-        cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, registration_date) VALUES (?, ?, ?)',
-                      (admin_id, 1, datetime.now().isoformat()))
-    
-    conn.commit()
-    conn.close()
-    
-    for admin_id in ADMIN_IDS:
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (admin_id,))
-        if not cursor.fetchone():
-            cursor.execute(
-                'INSERT INTO users (user_id, is_admin, registration_date) VALUES (?, ?, ?)',
-                (admin_id, 1, datetime.now().isoformat())
+    try:
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+
+        # Включаем поддержку внешних ключей
+        cursor.execute("PRAGMA foreign_keys = ON")
+
+        # Создаем таблицы, если они не существуют
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                balance INTEGER DEFAULT 1000,
+                registration_date TEXT,
+                is_admin INTEGER DEFAULT 0
             )
-        else:
-            cursor.execute(
-                'UPDATE users SET is_admin = ? WHERE user_id = ?',
-                (1, admin_id)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount INTEGER,
+                transaction_type TEXT,
+                game_type TEXT,
+                result TEXT,
+                timestamp TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
-    
-    conn.commit()
-    conn.close()
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                multiplier REAL,
+                fixed_win INTEGER,
+                discount INTEGER,
+                attempts INTEGER,
+                expires_at TEXT,
+                created_by INTEGER,
+                FOREIGN KEY (created_by) REFERENCES users(user_id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS promocodes (
+                code TEXT PRIMARY KEY,
+                bonus_amount INTEGER NOT NULL,
+                expires_at TEXT,
+                created_by INTEGER,
+                FOREIGN KEY (created_by) REFERENCES users(user_id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS used_promocodes (
+                user_id INTEGER,
+                code TEXT,
+                PRIMARY KEY (user_id, code),
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (code) REFERENCES promocodes(code)
+            )
+        ''')
+
+        # Добавляем администраторов
+        for admin_id in ADMIN_IDS:
+            # Проверяем существование администратора
+            cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (admin_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    'INSERT INTO users (user_id, is_admin, registration_date) VALUES (?, ?, ?)',
+                    (admin_id, 1, datetime.now().isoformat())
+                )
+
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Ошибка при инициализации базы данных: {e}")
+        raise  # Перебрасываем исключение для обработки выше
+    finally:
+        if conn:
+            conn.close()
 
 init_db()
 
