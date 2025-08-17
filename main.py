@@ -108,7 +108,7 @@ def init_db():
 init_db()
 
 def add_event(name: str, description: str, event_type: str, value: float, 
-              attempts: int, days_active: int, admin_id: int) -> bool:
+             attempts: int, days_active: int, admin_id: int) -> bool:
     expires_at = (datetime.now() + timedelta(days=days_active)).isoformat()
     
     conn = sqlite3.connect(DATABASE_NAME)
@@ -138,18 +138,6 @@ def add_event(name: str, description: str, event_type: str, value: float,
         return False
     finally:
         conn.close()
-
-def get_active_events() -> list:
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT * FROM events 
-        WHERE expires_at > datetime('now')
-        ORDER BY expires_at ASC
-    ''')
-    events = cursor.fetchall()
-    conn.close()
-    return events
 
 # Функции работы с базой данных
 def get_user(user_id: int) -> Dict:
@@ -442,28 +430,161 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # В menu.py
 async def events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    active_events = get_active_events()  # Реализовать аналогично get_all_events()
+    events = get_active_events()
     
-    if not active_events:
-        await update.callback_query.edit_message_text(
-            "🎉 На данный момент нет активных событий",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]
-            ])
-        )
+    if not events:
+        await send_or_edit(update, 
+                         "🎉 На данный момент нет активных событий",
+                         [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]])
         return
     
     keyboard = []
-    for event in active_events:
-        btn_text = f"{event['name']} - До {event['expires_at'][:10]}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_event_{event['id']}")])
+    for event in events:
+        event_info = (
+            f"{event['name']}\n"
+            f"До: {event['expires_at'][:10]}\n"
+            f"Попыток: {'∞' if event['attempts'] == -1 else event['attempts']}"
+        )
+        keyboard.append([InlineKeyboardButton(
+            event_info, 
+            callback_data=f"view_event_{event['id']}"
+        )])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')])
     
-    await update.callback_query.edit_message_text(
-        "🎁 Активные события:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await send_or_edit(update, "🎁 Активные события:", keyboard)
+
+def get_event_by_id(event_id):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM events WHERE event_id = ?', (event_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        return {
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'multiplier': row[3],
+            'fixed_win': row[4],
+            'discount': row[5],
+            'attempts': row[6],
+            'expires_at': row[7],
+            'created_by': row[8]
+        }
+    return None
+
+async def send_or_edit(update, text, keyboard):
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+
+def setup_handlers(application):
+    # Основные меню
+    application.add_handler(CallbackQueryHandler(events_menu, pattern='^events_menu$'))
+    application.add_handler(CallbackQueryHandler(view_event, pattern='^view_event_'))
+    
+    # Админ-панель
+    application.add_handler(CallbackQueryHandler(admin_events_menu, pattern='^admin_events$'))
+    application.add_handler(CallbackQueryHandler(admin_add_event, pattern='^admin_add_event$'))
+    application.add_handler(CallbackQueryHandler(admin_promocodes_menu, pattern='^admin_promocodes$'))
+    
+    # Обработчики создания событий
+    application.add_handler(CallbackQueryHandler(add_event_multiplier_handler, pattern='^add_event_multiplier$'))
+    # Добавьте другие обработчики по аналогии
+    
+    # Обработчик текстовых команд для создания событий
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'.+\|.+\|.+\|.+\|.+'),
+        process_event_creation
+    ))
+
+async def view_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    event_id = int(update.callback_query.data.split('_')[2])
+    event = get_event_by_id(event_id)
+    
+    if not event:
+        await update.callback_query.answer("Событие не найдено")
+        return
+    
+    text = (
+        f"🎁 <b>{event['name']}</b>\n\n"
+        f"{event['description']}\n\n"
+        f"📅 Действует до: {event['expires_at'][:10]}\n"
+        f"🔄 Осталось попыток: {'∞' if event['attempts'] == -1 else event['attempts']}\n"
     )
+    
+    if event['multiplier']:
+        text += f"📈 Множитель: x{event['multiplier']}\n"
+    elif event['fixed_win']:
+        text += f"💰 Фиксированный выигрыш: {event['fixed_win']} монет\n"
+    elif event['discount']:
+        text += f"🎫 Скидка: {event['discount']}% на крутки\n"
+    
+    text += f"\n👤 Создал: {get_admin_name(event['created_by'])}"
+    
+    keyboard = []
+    if get_user(update.effective_user.id)['is_admin']:
+        keyboard.append(
+            [InlineKeyboardButton("✏️ Изменить", callback_data=f"edit_event_{event_id}")]
+        )
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='events_menu')])
+    
+    await send_or_edit(update, text, keyboard)
+
+async def admin_promocodes_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    promocodes = get_all_promocodes()
+    
+    keyboard = []
+    for promo in promocodes:
+        keyboard.append([InlineKeyboardButton(
+            f"{promo['code']} (+{promo['amount']})", 
+            callback_data=f"view_promo_{promo['code']}"
+        )])
+    
+    keyboard.extend([
+        [InlineKeyboardButton("➕ Добавить промокод", callback_data='add_promocode')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
+    ])
+    
+    await send_or_edit(update, "🎫 Управление промокодами:", keyboard)
+
+def get_active_events():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT event_id, name, description, multiplier, fixed_win, discount, 
+               attempts, expires_at, created_by 
+        FROM events 
+        WHERE expires_at > datetime('now')
+        ORDER BY expires_at ASC
+    ''')
+    
+    events = []
+    for row in cursor.fetchall():
+        events.append({
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'multiplier': row[3],
+            'fixed_win': row[4],
+            'discount': row[5],
+            'attempts': row[6],
+            'expires_at': row[7],
+            'created_by': row[8]
+        })
+    conn.close()
+    return events
 
 def format_event_info(event: tuple) -> str:
     info = f"<b>{event[1]}</b>\n{event[2]}\n\n"
@@ -495,7 +616,7 @@ async def admin_events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_add_event_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📈 Коэффициент", callback_data='add_event_multiplier')],
+        [InlineKeyboardButton("📈 Коэффициент", callback_data='ltiplier')],
         [InlineKeyboardButton("💰 Фиксированный выигрыш", callback_data='add_event_fixed')],
         [InlineKeyboardButton("🎫 Скидка на крутки", callback_data='add_event_discount')],
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
@@ -599,7 +720,7 @@ async def admin_edit_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите событие для редактирования:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
+    
 def get_all_events():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -1432,15 +1553,111 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             name=str(update.effective_user.id))
     
     keyboard = [
-        [InlineKeyboardButton("📊 Полная статистика", callback_data='admin_full_stats')],
-        [InlineKeyboardButton("👤 Управление пользователями", callback_data='admin_users')],
-        [InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_menu')],
+        [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'),
+         InlineKeyboardButton("🛠 События", callback_data='admin_events')],
+        [InlineKeyboardButton("👤 Пользователи", callback_data='admin_users'),
+         InlineKeyboardButton("🎫 Промокоды", callback_data='admin_promocodes')],
+        [InlineKeyboardButton("🔙 В меню", callback_data='back_to_menu')]
     ]
+    await send_or_edit(update, "👑 Админ-панель:", keyboard)
+
+async def admin_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📈 Множитель", callback_data='add_event_multiplier')],
+        [InlineKeyboardButton("💰 Фиксированный бонус", callback_data='add_event_fixed')],
+        [InlineKeyboardButton("🎫 Скидка на крутки", callback_data='add_event_discount')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
+    ]
+    await send_or_edit(update, "Выберите тип события:", keyboard)
+
+async def add_event_multiplier_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['event_type'] = 'multiplier'
+    await send_or_edit(update, 
+                      "Введите данные для события в формате:\n"
+                      "Название|Описание|Множитель|Попытки (-1 для бесконечных)|Дней активности",
+                      [[InlineKeyboardButton("🔙 Отмена", callback_data='admin_add_event')]])
+
+async def process_event_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'event_type' not in context.user_data:
+        await update.message.reply_text("❌ Сначала выберите тип события через меню")
+        return
+
+    try:
+        data = update.message.text.split('|')
+        if len(data) != 5:
+            raise ValueError("Неверный формат данных")
+
+        name = data[0].strip()
+        description = data[1].strip()
+        value = float(data[2].strip())
+        attempts = int(data[3].strip())
+        days_active = int(data[4].strip())
+
+        event_type = context.user_data['event_type']
+        admin_id = update.effective_user.id
+
+        if event_type == 'multiplier':
+            success = add_event(
+                name=name,
+                description=description,
+                event_type="multiplier",
+                value=value,
+                attempts=attempts,
+                days_active=days_active,
+                admin_id=admin_id
+            )
+        elif event_type == 'fixed':
+            success = add_event(
+                name=name,
+                description=description,
+                event_type="fixed_win",
+                value=value,
+                attempts=attempts,
+                days_active=days_active,
+                admin_id=admin_id
+            )
+        elif event_type == 'discount':
+            success = add_event(
+                name=name,
+                description=description,
+                event_type="discount",
+                value=value,
+                attempts=attempts,
+                days_active=days_active,
+                admin_id=admin_id
+            )
+
+        if success:
+            await update.message.reply_text("✅ Событие успешно создано!")
+        else:
+            await update.message.reply_text("❌ Ошибка при создании события")
+
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Ошибка в формате данных: {str(e)}\n"
+                                      "Правильный формат: Название|Описание|Значение|Попытки|Дней активности")
+    finally:
+        context.user_data.pop('event_type', None)
+
+def get_all_promocodes():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT code, bonus_amount, expires_at, created_by 
+        FROM promocodes 
+        WHERE expires_at > datetime('now')
+        ORDER BY expires_at ASC
+    ''')
     
-    await query.edit_message_text(
-        '👑 Административная панель:',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    promocodes = []
+    for row in cursor.fetchall():
+        promocodes.append({
+            'code': row[0],
+            'amount': row[1],
+            'expires_at': row[2],
+            'created_by': row[3]
+        })
+    conn.close()
+    return promocodes
 
 async def admin_full_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.job_queue:
