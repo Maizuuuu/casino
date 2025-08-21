@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация бота
-TOKEN = "7802784921:AAHjeDU2Cp_THJGEnDpsvE5sM67L3qxQioQ"
+TOKEN = "7334381322:AAFnQuyzmVEyxhWMt8CMz1Y8wh4dxDVkibs"
 ADMIN_IDS = [123456789]  # Ваш Telegram ID
 DATABASE_NAME = "casino_bot.db"
 INITIAL_BALANCE = 1000
@@ -108,7 +108,26 @@ def init_db():
 init_db()
 
 def add_event(name: str, description: str, event_type: str, value: float, 
-             attempts: int, days_active: int, admin_id: int) -> bool:
+             attempts: int, days_active: int, admin_id: int) -> tuple:
+    """Добавляет событие с валидацией. Возвращает (success, message)"""
+    
+    # Валидация данных
+    if not name or not description:
+        return False, "Название и описание не могут быть пустыми"
+    
+    if event_type == "multiplier" and value <= 0:
+        return False, "Множитель должен быть положительным"
+    elif event_type == "fixed_win" and value <= 0:
+        return False, "Фиксированный выигрыш должен быть положительным"
+    elif event_type == "discount" and (value <= 0 or value > 100):
+        return False, "Скидка должна быть от 1% до 100%"
+    
+    if attempts < -1 or attempts == 0:
+        return False, "Попытки должны быть -1 (бесконечно) или положительным числом"
+    
+    if days_active <= 0:
+        return False, "Дней активности должно быть положительным числом"
+    
     expires_at = (datetime.now() + timedelta(days=days_active)).isoformat()
     
     conn = sqlite3.connect(DATABASE_NAME)
@@ -132,12 +151,325 @@ def add_event(name: str, description: str, event_type: str, value: float,
             ''', (name, description, int(value), attempts, expires_at, admin_id))
         
         conn.commit()
-        return True
+        return True, "Событие успешно создано!"
+    except sqlite3.IntegrityError:
+        return False, "Событие с таким названием уже существует"
     except Exception as e:
         logger.error(f"Error adding event: {e}")
+        return False, f"Ошибка при создании события: {str(e)}"
+    finally:
+        conn.close()
+
+async def admin_add_event_multiplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало создания события-множителя"""
+    context.user_data['event_creation'] = {
+        'type': 'multiplier',
+        'step': 'name'
+    }
+    
+    await send_or_edit(update,
+                      "📈 СОЗДАНИЕ МНОЖИТЕЛЯ\n\n"
+                      "Введите название события:",
+                      [[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+
+async def admin_add_event_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало создания события с фиксированным выигрышем"""
+    context.user_data['event_creation'] = {
+        'type': 'fixed_win',
+        'step': 'name'
+    }
+    
+    await send_or_edit(update,
+                      "💰 СОЗДАНИЕ ФИКСИРОВАННОГО ВЫИГРЫША\n\n"
+                      "Введите название события:",
+                      [[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+
+async def admin_add_event_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало создания события со скидкой"""
+    context.user_data['event_creation'] = {
+        'type': 'discount', 
+        'step': 'name'
+    }
+    
+    await send_or_edit(update,
+                      "🎫 СОЗДАНИЕ СКИДКИ\n\n"
+                      "Введите название события:",
+                      [[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+    
+def get_active_events_count() -> int:
+    """Возвращает количество активных событий"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM events WHERE expires_at > datetime("now")')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+async def handle_event_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка step-by-step создания события с правильными callback'ами"""
+    if 'event_creation' not in context.user_data:
+        await update.message.reply_text("❌ Сначала выберите тип события через меню")
+        return
+        
+    creation_data = context.user_data['event_creation']
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    try:
+        if creation_data['step'] == 'name':
+            if len(text) < 3:
+                await update.message.reply_text("❌ Название должно быть не менее 3 символов")
+                return
+                
+            creation_data['name'] = text
+            creation_data['step'] = 'description'
+            
+            await update.message.reply_text(
+                "📝 Введите описание события:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+            )
+            
+        elif creation_data['step'] == 'description':
+            if len(text) < 10:
+                await update.message.reply_text("❌ Описание должно быть не менее 10 символов")
+                return
+                
+            creation_data['description'] = text
+            creation_data['step'] = 'value'
+            
+            if creation_data['type'] == 'multiplier':
+                await update.message.reply_text(
+                    "🔢 Введите значение множителя (например: 2.5):",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+                )
+            elif creation_data['type'] == 'fixed_win':
+                await update.message.reply_text(
+                    "💰 Введите размер фиксированного выигрыша:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+                )
+            elif creation_data['type'] == 'discount':
+                await update.message.reply_text(
+                    "🎫 Введите размер скидки в процентах (1-100):",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+                )
+                
+        elif creation_data['step'] == 'value':
+            value = float(text)
+            
+            if creation_data['type'] == 'multiplier' and value <= 0:
+                await update.message.reply_text("❌ Множитель должен быть положительным")
+                return
+            elif creation_data['type'] == 'fixed_win' and value <= 0:
+                await update.message.reply_text("❌ Выигрыш должен быть положительным")
+                return
+            elif creation_data['type'] == 'discount' and (value <= 0 or value > 100):
+                await update.message.reply_text("❌ Скидка должна быть от 1% до 100%")
+                return
+                
+            creation_data['value'] = value
+            creation_data['step'] = 'attempts'
+            
+            await update.message.reply_text(
+                "🔄 Введите количество попыток (-1 для бесконечных):",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+            )
+            
+        elif creation_data['step'] == 'attempts':
+            attempts = int(text)
+            if attempts < -1 or attempts == 0:
+                await update.message.reply_text("❌ Попытки должны быть -1 (бесконечно) или положительным числом")
+                return
+                
+            creation_data['attempts'] = attempts
+            creation_data['step'] = 'days'
+            
+            await update.message.reply_text(
+                "📅 Введите количество дней активности события:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_cancel_event')]])  # ИЗМЕНЕНО
+            )
+            
+        elif creation_data['step'] == 'days':
+            days = int(text)
+            if days <= 0:
+                await update.message.reply_text("❌ Дней активности должно быть положительным числом")
+                return
+                
+            creation_data['days'] = days
+            
+            # Финальный шаг - создаем событие
+            success, message = add_event(
+                name=creation_data['name'],
+                description=creation_data['description'],
+                event_type=creation_data['type'],
+                value=creation_data['value'],
+                attempts=creation_data['attempts'],
+                days_active=creation_data['days'],
+                admin_id=user_id
+            )
+            
+            if success:
+                # Формируем красивый summary
+                event_type_name = {
+                    'multiplier': 'Множитель',
+                    'fixed_win': 'Фиксированный выигрыш', 
+                    'discount': 'Скидка'
+                }[creation_data['type']]
+                
+                summary = (
+                    f"✅ {message}\n\n"
+                    f"📋 Сводка события:\n"
+                    f"🏷 Тип: {event_type_name}\n"
+                    f"📛 Название: {creation_data['name']}\n"
+                    f"📝 Описание: {creation_data['description']}\n"
+                )
+                
+                if creation_data['type'] == 'multiplier':
+                    summary += f"📈 Множитель: x{creation_data['value']}\n"
+                elif creation_data['type'] == 'fixed_win':
+                    summary += f"💰 Выигрыш: {int(creation_data['value'])} монет\n"
+                elif creation_data['type'] == 'discount':
+                    summary += f"🎫 Скидка: {int(creation_data['value'])}%\n"
+                    
+                summary += (
+                    f"🔄 Попыток: {'∞' if creation_data['attempts'] == -1 else creation_data['attempts']}\n"
+                    f"📅 Дней активности: {creation_data['days']}\n"
+                    f"⏰ Истекает: {(datetime.now() + timedelta(days=creation_data['days'])).strftime('%d.%m.%Y')}"
+                )
+                
+                await update.message.reply_text(
+                    summary,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Создать еще", callback_data='admin_add_event')],
+                        [InlineKeyboardButton("📋 К событиям", callback_data='admin_view_events')],
+                        [InlineKeyboardButton("🔙 В админку", callback_data='admin_panel')]
+                    ])
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ {message}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Попробовать снова", callback_data='admin_add_event')]])
+                )
+            
+            # Очищаем данные создания
+            context.user_data.pop('event_creation', None)
+            
+    except ValueError:
+        await update.message.reply_text("❌ Пожалуйста, введите корректное число!")
+
+
+
+def delete_event(event_id: int) -> bool:
+    """Удаляет событие по ID"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('DELETE FROM events WHERE event_id = ?', (event_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error deleting event: {e}")
         return False
     finally:
         conn.close()
+
+async def cancel_event_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена создания события"""
+    if 'event_creation' in context.user_data:
+        context.user_data.pop('event_creation', None)
+        await update.callback_query.answer("❌ Создание события отменено")
+    
+    # Возвращаемся в меню добавления событий
+    keyboard = [
+        [InlineKeyboardButton("📈 Множитель выигрыша", callback_data='admin_add_event_multiplier')],
+        [InlineKeyboardButton("💰 Фиксированный бонус", callback_data='admin_add_event_fixed')],
+        [InlineKeyboardButton("🎫 Скидка на ставки", callback_data='admin_add_event_discount')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
+    ]
+    
+    text = (
+        "🎁 ВЫБЕРИТЕ ТИП СОБЫТИЯ\n\n"
+        "📈 <b>Множитель выигрыша</b> - увеличивает выигрыш в X раз\n"
+        "💰 <b>Фиксированный бонус</b> - добавляет N монет к выигрышу\n"  
+        "🎫 <b>Скидка на ставки</b> - уменьшает стоимость ставок на N%\n\n"
+        "Выберите тип:"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    
+def get_event_by_id(event_id: int) -> Dict:
+    """Получает полную информацию о событии по ID"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT event_id, name, description, multiplier, fixed_win, discount, 
+               attempts, expires_at, created_by 
+        FROM events WHERE event_id = ?
+    ''', (event_id,))
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        return {
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'multiplier': row[3],
+            'fixed_win': row[4],
+            'discount': row[5],
+            'attempts': row[6],
+            'expires_at': row[7],
+            'created_by': row[8]
+        }
+    return None
+
+def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
+    """Применяет активные бонусы событий к игре"""
+    events = get_active_events_for_game(game_type)
+    bonuses = {
+        'multiplier': 1.0,
+        'fixed_bonus': 0,
+        'discount': 0
+    }
+    
+    applied_events = []
+    
+    for event in events:
+        event_id = event[0]
+        
+        # Уменьшаем количество попыток
+        if event[6] > 0:  # Если не бесконечные попытки
+            decrease_event_attempts(event_id)
+        
+        if event[3]:  # Multiplier
+            bonuses['multiplier'] *= event[3]
+            applied_events.append(f"x{event[3]}")
+        elif event[4]:  # Fixed win
+            bonuses['fixed_bonus'] += event[4]
+            applied_events.append(f"+{event[4]} монет")
+        elif event[5]:  # Discount
+            discount_percent = event[5]
+            actual_discount = bet_amount * discount_percent / 100
+            bonuses['discount'] += actual_discount
+            applied_events.append(f"-{discount_percent}%")
+    
+    # Применяем скидку к ставке
+    final_bet = max(0, bet_amount - bonuses['discount'])
+    
+    return final_bet, bonuses, applied_events
 
 # Функции работы с базой данных
 def get_user(user_id: int) -> Dict:
@@ -336,48 +668,85 @@ def calculate_complex_coefficient(user_id: int, bet_amount: int, game_type: str)
     
     return 1.0
 
-async def play_dice(user_id: int, bet_amount: int, guess: int) -> Tuple[bool, float, int]:
+async def play_dice(user_id: int, bet_amount: int, guess: int) -> Tuple[bool, float, int, list, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0.0, 0
+        return False, 0.0, 0, [], 0
     
-    coefficient = calculate_complex_coefficient(user_id, bet_amount, "dice")
+    # ✅ ВЫЗЫВАЕМ ФУНКЦИЮ БОНУСОВ (РАНЬШЕ ЭТОГО НЕ БЫЛО!)
+    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "dice", bet_amount)
+    
+    # Проверяем, хватает ли баланса после применения скидок
+    if user['balance'] < final_bet:
+        return False, 0.0, 0, [], 0
+    
+    coefficient = calculate_complex_coefficient(user_id, final_bet, "dice")
     roll = random.randint(1, 6)
+    total_win_amount = 0
     
     if guess == roll:
-        win_amount = int(bet_amount * coefficient)
-        update_balance(user_id, win_amount)
-        add_transaction(user_id, win_amount, "win", "dice", f"guess:{guess},roll:{roll},coef:{coefficient:.2f}")
-        return True, coefficient, roll
+        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
+        base_win = int(final_bet * coefficient)          # Базовый выигрыш
+        total_win = base_win + bonuses['fixed_bonus']    # + фиксированный бонус
+        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        
+        update_balance(user_id, total_win_amount)
+        add_transaction(user_id, total_win_amount, "win", "dice", 
+                       f"guess:{guess},roll:{roll},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
+        return True, coefficient, roll, applied_events, total_win_amount
     
-    update_balance(user_id, -bet_amount)
-    add_transaction(user_id, -bet_amount, "loss", "dice", f"guess:{guess},roll:{roll},coef:{coefficient:.2f}")
-    return False, coefficient, roll
+    # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet (уже со скидкой)
+    update_balance(user_id, -final_bet)
+    add_transaction(user_id, -final_bet, "loss", "dice", 
+                   f"guess:{guess},roll:{roll},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
+    return False, coefficient, roll, applied_events, 0
 
-async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list]:
+async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list, list, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0.0, []
+        return False, 0.0, [], [], 0
     
-    coefficient = calculate_complex_coefficient(user_id, bet_amount, "slots")
+    # ✅ ВЫЗЫВАЕМ ФУНКЦИЮ БОНУСОВ
+    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "slots", bet_amount)
+    
+    if user['balance'] < final_bet:
+        return False, 0.0, [], [], 0
+    
+    coefficient = calculate_complex_coefficient(user_id, final_bet, "slots")
     symbols = ['🍒', '🍋', '🍊', '🍇', '🍉', '7']
     reels = [random.choice(symbols) for _ in range(3)]
     
-    if reels[0] == reels[1] == reels[2]:
-        win_coefficient = 3 if reels[0] == '7' else 1
-        win_amount = int(bet_amount * coefficient * win_coefficient)
-        update_balance(user_id, win_amount)
-        add_transaction(user_id, win_amount, "win", "slots", f"reels:{''.join(reels)},coef:{coefficient:.2f}x{win_coefficient}")
-        return True, coefficient * win_coefficient, reels
-    elif reels[0] == reels[1] or reels[1] == reels[2]:
-        win_amount = int(bet_amount * 0.5)
-        update_balance(user_id, win_amount)
-        add_transaction(user_id, win_amount, "win", "slots", f"reels:{''.join(reels)},coef:0.5")
-        return True, 0.5, reels
+    total_win_amount = 0
+    win_coefficient = 0
     
-    update_balance(user_id, -bet_amount)
-    add_transaction(user_id, -bet_amount, "loss", "slots", f"reels:{''.join(reels)},coef:{coefficient:.2f}")
-    return False, coefficient, reels
+    if reels[0] == reels[1] == reels[2]:
+        win_coefficient = 10 if reels[0] == '7' else 3
+        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
+        base_win = int(final_bet * win_coefficient)       # Базовый выигрыш
+        total_win = base_win + bonuses['fixed_bonus']     # + фиксированный бонус
+        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        
+        update_balance(user_id, total_win_amount)
+        add_transaction(user_id, total_win_amount, "win", "slots", 
+                       f"reels:{''.join(reels)},coef:{coefficient:.2f}x{win_coefficient},events:{applied_events},final_bet:{final_bet}")
+        return True, coefficient * win_coefficient, reels, applied_events, total_win_amount
+    elif reels[0] == reels[1] or reels[1] == reels[2]:
+        win_coefficient = 0.5
+        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
+        base_win = int(final_bet * win_coefficient)       # Базовый выигрыш
+        total_win = base_win + bonuses['fixed_bonus']     # + фиксированный бонус
+        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        
+        update_balance(user_id, total_win_amount)
+        add_transaction(user_id, total_win_amount, "win", "slots", 
+                       f"reels:{''.join(reels)},coef:0.5,events:{applied_events},final_bet:{final_bet}")
+        return True, 0.5, reels, applied_events, total_win_amount
+    
+    # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet
+    update_balance(user_id, -final_bet)
+    add_transaction(user_id, -final_bet, "loss", "slots", 
+                   f"reels:{''.join(reels)},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
+    return False, coefficient, reels, applied_events, 0
 
 
 # Обработчики команд
@@ -403,14 +772,26 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['chat_id'] = update.effective_chat.id
     context.user_data['user_id'] = update.effective_user.id
     
+    # Проверяем количество активных событий
+    events_count = get_active_events_count()
+    events_text = "🎉 События" + (f" ({events_count})" if events_count > 0 else "")
+    
     keyboard = [
         [InlineKeyboardButton("🎮 Игры", callback_data='games_menu')],
-        [InlineKeyboardButton("🎉 События", callback_data='events_menu')],  # Новая кнопка
+        [InlineKeyboardButton(events_text, callback_data='events_menu')],  # С подсчетом
         [InlineKeyboardButton("💰 Баланс", callback_data='balance')],
         [InlineKeyboardButton("👤 Пользователи", callback_data='users_menu')],
     ]
 
+    # Добавляем кнопку админки если пользователь админ
+    user_data = get_user(update.effective_user.id)
+
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Формируем текст с информацией о событиях
+    menu_text = '🎰 <b>Главное меню</b>'
+    if events_count > 0:
+        menu_text += f'\n\n🎁 <b>Доступно {events_count} активных событий!</b>'
     
     # Очищаем таймер, если он был
     if 'job' in context.user_data:
@@ -419,40 +800,55 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            '🎰 Главное меню:',
-            reply_markup=reply_markup
+            menu_text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
         )
     else:
         await update.message.reply_text(
-            '🎰 Главное меню:',
-            reply_markup=reply_markup
+            menu_text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
         )
 
 # В menu.py
 async def events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню активных событий для всех пользователей"""
     events = get_active_events()
     
     if not events:
         await send_or_edit(update, 
-                         "🎉 На данный момент нет активных событий",
+                         "🎉 На данный момент нет активных событий\n\n"
+                         "Здесь будут появляться специальные акции и бонусы!",
                          [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]])
         return
     
+    text = "🎁 <b>АКТИВНЫЕ СОБЫТИЯ</b>\n\n"
+    text += "Выберите событие для просмотра деталей:\n\n"
+    
     keyboard = []
     for event in events:
-        event_info = (
-            f"{event['name']}\n"
-            f"До: {event['expires_at'][:10]}\n"
-            f"Попыток: {'∞' if event['attempts'] == -1 else event['attempts']}"
-        )
+        # Создаем краткое описание для кнопки
+        event_icon = "📈" if event['multiplier'] else "💰" if event['fixed_win'] else "🎫"
+        event_value = f"x{event['multiplier']}" if event['multiplier'] else f"+{event['fixed_win']}" if event['fixed_win'] else f"-{event['discount']}%"
+        
+        days_left = (datetime.fromisoformat(event['expires_at']) - datetime.now()).days
+        days_text = f" ({days_left}д.)" if days_left > 0 else " (сегодня!)"
+        
+        button_text = f"{event_icon} {event['name']} {event_value}{days_text}"
+        
+        # Обрезаем если слишком длинное
+        if len(button_text) > 35:
+            button_text = button_text[:32] + "..."
+            
         keyboard.append([InlineKeyboardButton(
-            event_info, 
+            button_text, 
             callback_data=f"view_event_{event['id']}"
         )])
     
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')])
+    keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data='back_to_menu')])
     
-    await send_or_edit(update, "🎁 Активные события:", keyboard)
+    await send_or_edit(update, text, keyboard)
 
 def get_event_by_id(event_id):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -510,35 +906,79 @@ def setup_handlers(application):
     ))
 
 async def view_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    event_id = int(update.callback_query.data.split('_')[2])
+    """Детальный просмотр события для пользователей"""
+    event_id = int(update.callback_query.data.split('_')[-1])
     event = get_event_by_id(event_id)
     
-    if not event:
-        await update.callback_query.answer("Событие не найдено")
+    if not event or datetime.fromisoformat(event['expires_at']) < datetime.now():
+        await update.callback_query.answer("Событие не найдено или истекло")
+        await events_menu(update, context)
         return
     
-    text = (
-        f"🎁 <b>{event['name']}</b>\n\n"
-        f"{event['description']}\n\n"
-        f"📅 Действует до: {event['expires_at'][:10]}\n"
-        f"🔄 Осталось попыток: {'∞' if event['attempts'] == -1 else event['attempts']}\n"
-    )
+    # Форматируем информацию о событии
+    event_type = ""
+    event_value = ""
     
     if event['multiplier']:
-        text += f"📈 Множитель: x{event['multiplier']}\n"
+        event_type = "📈 МНОЖИТЕЛЬ ВЫИГРЫША"
+        event_value = f"Увеличивает ваш выигрыш в <b>x{event['multiplier']}</b> раз!"
     elif event['fixed_win']:
-        text += f"💰 Фиксированный выигрыш: {event['fixed_win']} монет\n"
+        event_type = "💰 ФИКСИРОВАННЫЙ БОНУС"
+        event_value = f"Добавляет <b>{event['fixed_win']} монет</b> к каждому выигрышу!"
     elif event['discount']:
-        text += f"🎫 Скидка: {event['discount']}% на крутки\n"
+        event_type = "🎫 СКИДКА НА СТАВКИ"
+        event_value = f"Уменьшает стоимость ставок на <b>{event['discount']}%</b>!"
     
-    text += f"\n👤 Создал: {get_admin_name(event['created_by'])}"
+    # Рассчитываем оставшееся время
+    expires_at = datetime.fromisoformat(event['expires_at'])
+    time_left = expires_at - datetime.now()
+    days_left = time_left.days
+    hours_left = time_left.seconds // 3600
+    
+    time_left_text = ""
+    if days_left > 0:
+        time_left_text = f"⏰ Осталось: <b>{days_left} дней</b>"
+    elif hours_left > 0:
+        time_left_text = f"⏰ Осталось: <b>{hours_left} часов</b>"
+    else:
+        time_left_text = "⏰ Заканчивается <b>сегодня</b>!"
+    
+    attempts_text = "🔄 Попыток: <b>∞</b>" if event['attempts'] == -1 else f"🔄 Осталось попыток: <b>{event['attempts']}</b>"
+    
+    text = (
+        f"{event_type}\n\n"
+        f"🎯 <b>{event['name']}</b>\n\n"
+        f"{event['description']}\n\n"
+        f"{event_value}\n\n"
+        f"{time_left_text}\n"
+        f"{attempts_text}\n\n"
+        f"👤 Создано: {get_admin_name(event['created_by'])}"
+    )
     
     keyboard = []
-    if get_user(update.effective_user.id)['is_admin']:
-        keyboard.append(
-            [InlineKeyboardButton("✏️ Изменить", callback_data=f"edit_event_{event_id}")]
-        )
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='events_menu')])
+    
+    # Добавляем кнопку "Использовать" если есть попытки
+    if event['attempts'] != 0:
+        # Определяем для каких игр применимо событие
+        applicable_games = []
+        if event['multiplier'] or event['fixed_win']:
+            applicable_games.extend(['dice', 'slots', 'roulette'])
+        if event['discount']:
+            applicable_games.extend(['slots'])  # Скидки только для слотов по текущей логике
+        
+        if applicable_games:
+            keyboard.append([InlineKeyboardButton("🎮 Использовать в играх", callback_data='games_menu')])
+    
+    keyboard.append([InlineKeyboardButton("📋 Все события", callback_data='events_menu')])
+    keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data='back_to_menu')])
+    
+    # Добавляем кнопки редактирования для админов
+    user_data = get_user(update.effective_user.id)
+    if user_data and user_data['is_admin']:
+        keyboard.append([
+            InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_edit_event_{event_id}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"admin_confirm_delete_{event_id}")
+        ])
     
     await send_or_edit(update, text, keyboard)
 
@@ -602,30 +1042,99 @@ def format_event_info(event: tuple) -> str:
 
 # В admin.py
 async def admin_events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню управления событиями"""
     keyboard = [
         [InlineKeyboardButton("➕ Добавить событие", callback_data='admin_add_event')],
-        [InlineKeyboardButton("✏️ Редактировать события", callback_data='admin_edit_events')],
-        [InlineKeyboardButton("🎫 Промокоды", callback_data='admin_promocodes')],
+        [InlineKeyboardButton("📋 Активные события", callback_data='admin_view_events')],
+        [InlineKeyboardButton("🗑 Удалить событие", callback_data='admin_delete_event')],
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
     ]
     
-    await update.callback_query.edit_message_text(
-        "🛠 Управление событиями:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await send_or_edit(update, "🛠 Управление событиями:", keyboard)
 
-async def admin_add_event_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_view_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Просмотр всех активных событий"""
+    events = get_active_events()
+    
+    if not events:
+        await send_or_edit(update, 
+                         "📭 Нет активных событий",
+                         [[InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]])
+        return
+    
+    keyboard = []
+    for event in events:
+        event_info = f"{event['name']} (ID: {event['id']})"
+        keyboard.append([InlineKeyboardButton(event_info, callback_data=f"admin_event_info_{event['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_events')])
+    
+    await send_or_edit(update, "📋 Активные события:", keyboard)
+
+async def admin_event_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о конкретном событии"""
+    event_id = int(update.callback_query.data.split('_')[-1])
+    event = get_event_by_id(event_id)
+    
+    if not event:
+        await update.callback_query.answer("Событие не найдено")
+        return
+    
+    text = (
+        f"🎁 <b>{event['name']}</b>\n\n"
+        f"{event['description']}\n\n"
+        f"📅 Действует до: {event['expires_at'][:10]}\n"
+        f"🔄 Осталось попыток: {'∞' if event['attempts'] == -1 else event['attempts']}\n"
+    )
+    
+    if event['multiplier']:
+        text += f"📈 Множитель: x{event['multiplier']}\n"
+    elif event['fixed_win']:
+        text += f"💰 Фиксированный выигрыш: {event['fixed_win']} монет\n"
+    elif event['discount']:
+        text += f"🎫 Скидка: {event['discount']}% на крутки\n"
+    
+    text += f"\n👤 Создал: {get_admin_name(event['created_by'])}"
+    
     keyboard = [
-        [InlineKeyboardButton("📈 Коэффициент", callback_data='ltiplier')],
-        [InlineKeyboardButton("💰 Фиксированный выигрыш", callback_data='add_event_fixed')],
-        [InlineKeyboardButton("🎫 Скидка на крутки", callback_data='add_event_discount')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"admin_confirm_delete_{event_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_view_events')]
     ]
     
-    await update.callback_query.edit_message_text(
-        "Выберите тип события:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await send_or_edit(update, text, keyboard)
+
+async def admin_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение удаления события"""
+    event_id = int(update.callback_query.data.split('_')[-1])
+    event = get_event_by_id(event_id)
+    
+    if not event:
+        await update.callback_query.answer("Событие не найдено")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, удалить", callback_data=f"admin_delete_confirm_{event_id}")],
+        [InlineKeyboardButton("❌ Нет, отмена", callback_data=f"admin_event_info_{event_id}")]
+    ]
+    
+    await send_or_edit(update, 
+                      f"❓ Вы уверены, что хотите удалить событие \"{event['name']}\"?",
+                      keyboard)
+    
+async def admin_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Финальное удаление события"""
+    event_id = int(update.callback_query.data.split('_')[-1])
+    
+    if delete_event(event_id):
+        await send_or_edit(update, 
+                          "✅ Событие успешно удалено!",
+                          [[InlineKeyboardButton("🔙 К списку событий", callback_data='admin_view_events')]])
+    else:
+        await send_or_edit(update, 
+                          "❌ Ошибка при удалении события",
+                          [[InlineKeyboardButton("🔙 Назад", callback_data='admin_view_events')]])
+
+
 
 # promocodes.py
 def add_promocode(code: str, amount: int, days: int, admin_id: int) -> bool:
@@ -686,10 +1195,8 @@ async def use_promocode(user_id: int, code: str) -> tuple:
 
 async def admin_events_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить событие", callback_data='admin_add_event')],
-        [InlineKeyboardButton("✏️ Изменить события", callback_data='admin_edit_events')],
+        [InlineKeyboardButton("➕ Добавить событие", callback_data='admin_add_event')], 
         [InlineKeyboardButton("❌ Удалить событие", callback_data='admin_delete_event')],
-        [InlineKeyboardButton("🎫 Управление промокодами", callback_data='admin_promocodes')],
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
     ]
     await update.callback_query.edit_message_text(
@@ -741,28 +1248,6 @@ def get_all_events():
     conn.close()
     return events
 
-# В game_mechanics.py
-def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
-    events = get_active_events_for_game(game_type)
-    bonuses = {
-        'multiplier': 1.0,
-        'fixed_bonus': 0,
-        'discount': 0
-    }
-    
-    for event in events:
-        # Уменьшаем количество попыток
-        if event[6] > 0:  # Если не бесконечные попытки
-            decrease_event_attempts(event[0])
-        
-        if event[3]:  # Multiplier
-            bonuses['multiplier'] *= event[3]
-        elif event[4]:  # Fixed win
-            bonuses['fixed_bonus'] += event[4]
-        elif event[5]:  # Discount
-            bonuses['discount'] = max(bonuses['discount'], event[5])
-    
-    return (bet_amount, bonuses)
 
 def decrease_event_attempts(event_id: int):
     """Уменьшаем количество оставшихся попыток"""
@@ -916,18 +1401,35 @@ async def auto_delete_disclaimer(context: CallbackContext):
 #         logger.error(f"Ошибка при удалении дисклеймера: {e}")
         
 async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Проверяем есть ли активные события
+    events_count = get_active_events_count()
+    events_info = f"\n\n🎁 Доступно {events_count} активных бонусов!" if events_count > 0 else ""
+    
     keyboard = [
         [InlineKeyboardButton("🎲 Кости", callback_data='game_dice'),
          InlineKeyboardButton("🎰 Слоты", callback_data='game_slots'),
          InlineKeyboardButton("🎡 Рулетка", callback_data='game_roulette')],
         [InlineKeyboardButton("📖 Правила игр", callback_data='game_rules')],
+        [InlineKeyboardButton("🎉 Активные события", callback_data='events_menu')],  # ДОБАВЛЕНО
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
     ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        '🎮 Выберите игру:',
-        reply_markup=reply_markup
-    )
+    
+    text = f'🎮 <b>Выберите игру</b>{events_info}'
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
 
 async def game_roulette_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
@@ -965,7 +1467,7 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     
     try:
-        # Если это выбор числа для ставки (проверяем только когда ожидается число)
+        # Если это выбор числа для ставки
         if context.user_data.get('roulette_bet_type') == 'number' and 'roulette_number' not in context.user_data:
             number = int(text)
             if number < 0 or number > 36:
@@ -979,7 +1481,7 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
             
-        # Обработка суммы ставки (здесь НЕ проверяем 0-36)
+        # Обработка суммы ставки
         bet_amount = int(text)
         if bet_amount <= 0:
             await update.message.reply_text("❌ Сумма ставки должна быть положительной!")
@@ -999,17 +1501,22 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
             bet_type = str(context.user_data['roulette_number'])
         
-        # Играем
-        win, payout, result = await play_roulette(user_id, bet_type, bet_amount)
+        # Играем с учетом бонусов событий
+        win, payout, result, applied_events, final_bet = await play_roulette(user_id, bet_type, bet_amount)
         
         # Формируем ответ
         if win:
             response = f"🎉 Вы выиграли {payout} монет!\n"
         else:
-            response = f"❌ Вы проиграли {bet_amount} монет.\n"
+            response = f"❌ Вы проиграли {final_bet} монет.\n"
             
         response += f"🎡 {result}\n"
-        response += f"💰 Ваш баланс: {user_data['balance'] + (payout - bet_amount) if win else user_data['balance'] - bet_amount}"
+        
+        # Добавляем информацию о примененных бонусах
+        if applied_events:
+            response += f"🎁 Примененные бонусы: {', '.join(applied_events)}\n"
+            
+        response += f"💰 Ваш баланс: {get_user(user_id)['balance']}"
 
         # Кнопка для повторной игры
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎡 Играть снова", callback_data='game_roulette')]])
@@ -1046,6 +1553,24 @@ async def users_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply_markup=reply_markup
         )
 
+async def admin_delete_event_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню выбора события для удаления"""
+    events = get_all_events()
+    
+    if not events:
+        await send_or_edit(update, 
+                         "📭 Нет событий для удаления",
+                         [[InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]])
+        return
+    
+    keyboard = []
+    for event in events:
+        event_info = f"{event['name']} (ID: {event['id']})"
+        keyboard.append([InlineKeyboardButton(event_info, callback_data=f"admin_confirm_delete_{event['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_events')])
+    
+    await send_or_edit(update, "🗑 Выберите событие для удаления:", keyboard)
 
 # Новая функция для отображения правил
 async def game_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1084,10 +1609,17 @@ async def game_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[bool, int, str]:
+async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[bool, int, str, list, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0, "Недостаточно средств"
+        return False, 0, "Недостаточно средств", [], 0
+    
+    # ПРИМЕНЯЕМ БОНУСЫ СОБЫТИЙ
+    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "roulette", bet_amount)
+    
+    # Проверяем, хватает ли баланса после применения скидок
+    if user['balance'] < final_bet:
+        return False, 0, "Недостаточно средств после применения скидок", [], 0
 
     # Генерация случайного числа (0-36)
     winning_number = random.randint(0, 36)
@@ -1102,56 +1634,58 @@ async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[b
 
     # Проверяем выигрыш
     win = False
-    payout = 0
+    base_payout = 0
+    payout_multiplier = 1
     
     if bet_type.isdigit():  # Ставка на конкретное число (1-36)
         if int(bet_type) == winning_number:
             win = True
-            payout = bet_amount * 35
+            base_payout = final_bet * 35
+            payout_multiplier = 35
     else:
         bet_type = bet_type.lower()
         if bet_type == "red" and color == "red":
             win = True
-            payout = bet_amount * 1
+            base_payout = final_bet * 1
+            payout_multiplier = 1
         elif bet_type == "black" and color == "black":
             win = True
-            payout = bet_amount * 1
+            base_payout = final_bet * 1
+            payout_multiplier = 1
         elif bet_type == "even" and winning_number % 2 == 0 and winning_number != 0:
             win = True
-            payout = bet_amount * 1
+            base_payout = final_bet * 1
+            payout_multiplier = 1
         elif bet_type == "odd" and winning_number % 2 == 1:
             win = True
-            payout = bet_amount * 1
+            base_payout = final_bet * 1
+            payout_multiplier = 1
         elif bet_type == "1to18" and 1 <= winning_number <= 18:
             win = True
-            payout = bet_amount * 1
+            base_payout = final_bet * 1
+            payout_multiplier = 1
         elif bet_type == "19to36" and 19 <= winning_number <= 36:
             win = True
-            payout = bet_amount * 1
-        elif bet_type in ["col1", "col2", "col3"]:  # Колонки (1-12, 13-24, 25-36)
-            col_num = int(bet_type[-1])
-            if (col_num == 1 and 1 <= winning_number <= 12) or \
-               (col_num == 2 and 13 <= winning_number <= 24) or \
-               (col_num == 3 and 25 <= winning_number <= 36):
-                win = True
-                payout = bet_amount * 2
-        elif bet_type in ["doz1", "doz2", "doz3"]:  # Дюжины (1-12, 13-24, 25-36)
-            doz_num = int(bet_type[-1])
-            if (doz_num == 1 and 1 <= winning_number <= 12) or \
-               (doz_num == 2 and 13 <= winning_number <= 24) or \
-               (doz_num == 3 and 25 <= winning_number <= 36):
-                win = True
-                payout = bet_amount * 2
+            base_payout = final_bet * 1
+            payout_multiplier = 1
 
-    # Обновляем баланс
+    total_win_amount = 0
+    
     if win:
-        update_balance(user_id, payout)
-        add_transaction(user_id, payout, "win", "roulette", f"bet:{bet_type},win:{winning_number}")
+        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
+        total_win = base_payout + bonuses['fixed_bonus']     # + фиксированный бонус
+        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        
+        update_balance(user_id, total_win_amount)
+        add_transaction(user_id, total_win_amount, "win", "roulette", 
+                       f"bet:{bet_type},win:{winning_number},payout_x:{payout_multiplier},events:{applied_events},final_bet:{final_bet}")
     else:
-        update_balance(user_id, -bet_amount)
-        add_transaction(user_id, -bet_amount, "loss", "roulette", f"bet:{bet_type},win:{winning_number}")
+        # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet
+        update_balance(user_id, -final_bet)
+        add_transaction(user_id, -final_bet, "loss", "roulette", 
+                       f"bet:{bet_type},win:{winning_number},events:{applied_events},final_bet:{final_bet}")
 
-    return win, payout, f"Выпало: {winning_number} ({color})"
+    return win, total_win_amount, f"Выпало: {winning_number} ({color})", applied_events, final_bet
 
 async def transfer_money_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.edit_message_text(
@@ -1488,20 +2022,20 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return
                 
             guess = context.user_data['dice_guess']
-            won, coefficient, roll = await play_dice(user_id, bet_amount, guess)
+            won, coefficient, roll, applied_events, win_amount = await play_dice(user_id, bet_amount, guess)
             
             response = (
-    f"🎉 Поздравляем! Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
-    f"🎲 Выпало: {roll} (ставка: {guess})\n"
-    f"📈 Коэф: {coefficient:.2f}x\n"
-    if won else
-    f"❌ Проигрыш: {bet_amount} монет\n"
-    f"🎲 Выпало: {roll} (ставка: {guess})\n"
-    f"📈 Коэф был: {coefficient:.2f}x\n"
-)
+                f"🎉 Поздравляем! Выигрыш: {win_amount} монет!\n"
+                f"🎲 Выпало: {roll} (ставка: {guess})\n"
+                f"📈 Коэф: {coefficient:.2f}x\n"
+                if won else
+                f"❌ Проигрыш: {bet_amount} монет\n"
+                f"🎲 Выпало: {roll} (ставка: {guess})\n"
+                f"📈 Коэф был: {coefficient:.2f}x\n"
+            )
             
         elif game_type == 'slots':
-            won, coefficient, reels = await play_slots(user_id, bet_amount)
+            won, coefficient, reels, applied_events, win_amount = await play_slots(user_id, bet_amount)
             
             if won:
                 if reels[0] == reels[1] == reels[2]:
@@ -1511,8 +2045,8 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 
                 response = (
                     f"{win_text}\n🎰 {' '.join(reels)}\n"
-                    f"💰 Выигрыш: {bet_amount * coefficient:.0f} монет!\n"
-                    f"📈 Коэф был: {coefficient:.2f}x\n"
+                    f"💰 Выигрыш: {win_amount} монет!\n"
+                    f"📈 Коэф: {coefficient:.2f}x\n"
                 )
             else:
                 response = (
@@ -1521,6 +2055,14 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     f"📈 Коэф был: {coefficient:.2f}x\n"
                 )
         
+        # Добавляем информацию о примененных бонусах
+        if applied_events:
+            response += f"🎁 Примененные бонусы: {', '.join(applied_events)}\n"
+        if applied_events:
+            bonus_text = "🎁 АКТИВНЫЕ БОНУСЫ:\n"
+            for bonus in applied_events:
+                bonus_text += f"   • {bonus}\n"
+            response = bonus_text + response
         # Общий вывод для всех игр
         response += f"💰 Баланс: {get_user(user_id)['balance']}"
         keyboard = [
@@ -1535,6 +2077,7 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
     except ValueError:
         await update.message.reply_text("❌ Введите целое число!")
+
 # Админ-панель
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1553,7 +2096,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             name=str(update.effective_user.id))
     
     keyboard = [
-        [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'),
+        [InlineKeyboardButton("📊 Статистика", callback_data='admin_full_stats'),
          InlineKeyboardButton("🛠 События", callback_data='admin_events')],
         [InlineKeyboardButton("👤 Пользователи", callback_data='admin_users'),
          InlineKeyboardButton("🎫 Промокоды", callback_data='admin_promocodes')],
@@ -1562,13 +2105,23 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_or_edit(update, "👑 Админ-панель:", keyboard)
 
 async def admin_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню выбора типа события для создания"""
     keyboard = [
-        [InlineKeyboardButton("📈 Множитель", callback_data='add_event_multiplier')],
-        [InlineKeyboardButton("💰 Фиксированный бонус", callback_data='add_event_fixed')],
-        [InlineKeyboardButton("🎫 Скидка на крутки", callback_data='add_event_discount')],
+        [InlineKeyboardButton("📈 Множитель выигрыша", callback_data='admin_add_event_multiplier')],
+        [InlineKeyboardButton("💰 Фиксированный бонус", callback_data='admin_add_event_fixed')],
+        [InlineKeyboardButton("🎫 Скидка на ставки", callback_data='admin_add_event_discount')],
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_events')]
     ]
-    await send_or_edit(update, "Выберите тип события:", keyboard)
+    
+    text = (
+        "🎁 ВЫБЕРИТЕ ТИП СОБЫТИЯ\n\n"
+        "📈 <b>Множитель выигрыша</b> - увеличивает выигрыш в X раз\n"
+        "💰 <b>Фиксированный бонус</b> - добавляет N монет к выигрышу\n"  
+        "🎫 <b>Скидка на ставки</b> - уменьшает стоимость ставок на N%\n\n"
+        "Выберите тип:"
+    )
+    
+    await send_or_edit(update, text, keyboard)
 
 async def add_event_multiplier_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['event_type'] = 'multiplier'
@@ -1964,9 +2517,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Вы не зарегистрированы. Используйте /start")
         return
 
-    # 1. Сначала проверяем рулетку
+    # 1. Проверяем создание события (ПЕРВЫМ, чтобы перехватывать все сообщения)
+    if 'event_creation' in context.user_data:
+        await handle_event_creation(update, context)
+        return
+    
+    # 2. Проверяем рулетку
     if 'roulette_bet_type' in context.user_data:
         await handle_roulette_bet(update, context)
+        return
+    
+    # 3. Проверяем другие игры
+    if 'current_game' in context.user_data:
+        await handle_bet(update, context)
+        return
+    
+    # 4. Проверяем перевод денег
+    if 'transfer_step' in context.user_data:
+        await handle_transfer(update, context)
+        return
+    
+    # 5. Проверяем админ-действия
+    if 'admin_step' in context.user_data:
+        step = context.user_data['admin_step']
+        if step == 'wait_user_id':
+            await admin_process_user_id(update, context)
+        elif step == 'wait_amount':
+            await admin_process_amount(update, context)
         return
     
     if update.message.text.startswith('/balance'):
@@ -1976,25 +2553,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             await check_balance(update, context)
         return
-    
-    # 2. Проверяем другие игры
-    if 'current_game' in context.user_data:
-        await handle_bet(update, context)
-        return
-    
-    # 3. Проверяем перевод денег
-    if 'transfer_step' in context.user_data:
-        await handle_transfer(update, context)
-        return
-    
-    # 4. Проверяем админ-действия
-    if 'admin_step' in context.user_data:
-        step = context.user_data['admin_step']
-        if step == 'wait_user_id':
-            await admin_process_user_id(update, context)
-        elif step == 'wait_amount':
-            await admin_process_amount(update, context)
-        return
+
     
     # 5. Общие команды
     await menu(update, context)
@@ -2007,7 +2566,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if data.startswith('disclaim_ok_'):
         try:
-            # Удаляем сообщение с дисклеймером
+            # Удаляем сообщение с дисклеймером  
             await query.message.delete()
             
             # Очищаем данные дисклеймера
@@ -2052,6 +2611,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     
     # 5. Меню пользователей
+    elif data == 'events_menu':
+        await events_menu(update, context)
+    elif data.startswith('view_event_'):
+        await view_event(update, context)
+    elif data == 'admin_add_event':
+        await admin_add_event(update, context)
+    elif data == 'admin_add_event_multiplier':
+        await admin_add_event_multiplier(update, context)
+    elif data == 'admin_add_event_fixed':
+        await admin_add_event_fixed(update, context)  
+    elif data == 'admin_add_event_discount':
+        await admin_add_event_discount(update, context)
+    elif data == 'admin_cancel_event':  # НОВЫЙ ОБРАБОТЧИК ДЛЯ ОТМЕНЫ
+        await cancel_event_creation(update, context)
+    elif data == 'admin_events':
+        await admin_events_menu(update, context)
+    elif data == 'admin_add_event':
+        await admin_add_event(update, context)
+    elif data == 'admin_view_events':
+        await admin_view_events(update, context)
+    elif data == 'admin_delete_event':
+        await admin_delete_event_menu(update, context)
+    elif data.startswith('admin_event_info_'):
+        await admin_event_info(update, context)
+    elif data.startswith('admin_confirm_delete_'):
+        await admin_confirm_delete(update, context)
+    elif data.startswith('admin_delete_confirm_'):
+        await admin_delete_confirm(update, context)
     elif data == 'users_menu':
         await users_menu(update, context)
     elif data == 'game_dice':
