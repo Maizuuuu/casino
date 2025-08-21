@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация бота
-TOKEN = "7802784921:AAHjeDU2Cp_THJGEnDpsvE5sM67L3qxQioQ"
+TOKEN = "7334381322:AAFnQuyzmVEyxhWMt8CMz1Y8wh4dxDVkibs"
 ADMIN_IDS = [123456789]  # Ваш Telegram ID
 DATABASE_NAME = "casino_bot.db"
 INITIAL_BALANCE = 1000
@@ -437,12 +437,14 @@ def get_event_by_id(event_id: int) -> Dict:
     return None
 
 def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
-    """Применяет активные бонусы событий к игре"""
+    """Применяет активные бонусы событий к игре - ФИНАЛЬНАЯ ВЕРСИЯ"""
     events = get_active_events_for_game(game_type)
+    
     bonuses = {
-        'multiplier': 1.0,
-        'fixed_bonus': 0,
-        'discount': 0
+        'event_multiplier': 1.0,   # Суммарный множитель из ВСЕХ событий
+        'fixed_bonus': 0,          # Суммарный фиксированный бонус
+        'discount_percent': 0,     # Максимальная скидка
+        'discount_amount': 0,      # Абсолютная сумма скидки
     }
     
     applied_events = []
@@ -451,25 +453,23 @@ def apply_event_bonuses(user_id: int, game_type: str, bet_amount: int) -> tuple:
         event_id = event[0]
         
         # Уменьшаем количество попыток
-        if event[6] > 0:  # Если не бесконечные попытки
+        if event[6] > 0:
             decrease_event_attempts(event_id)
         
         if event[3]:  # Multiplier
-            bonuses['multiplier'] *= event[3]
+            bonuses['event_multiplier'] *= event[3]
             applied_events.append(f"x{event[3]}")
         elif event[4]:  # Fixed win
             bonuses['fixed_bonus'] += event[4]
             applied_events.append(f"+{event[4]} монет")
         elif event[5]:  # Discount
-            discount_percent = event[5]
-            actual_discount = bet_amount * discount_percent / 100
-            bonuses['discount'] += actual_discount
-            applied_events.append(f"-{discount_percent}%")
+            bonuses['discount_percent'] = max(bonuses['discount_percent'], event[5])
+            applied_events.append(f"-{event[5]}%")
     
-    # Применяем скидку к ставке
-    final_bet = max(0, bet_amount - bonuses['discount'])
+    # Рассчитываем абсолютную сумму скидки
+    bonuses['discount_amount'] = bet_amount * bonuses['discount_percent'] / 100
     
-    return final_bet, bonuses, applied_events
+    return bet_amount, bonuses, applied_events
 
 # Функции работы с базой данных
 def get_user(user_id: int) -> Dict:
@@ -659,60 +659,63 @@ def calculate_complex_coefficient(user_id: int, bet_amount: int, game_type: str)
         return max(1.0, min(6.0, coefficient * 3.5))
     
     elif game_type == "slots":
-        base = random.uniform(0.5, 1.5)
-        mod1 = math.cos(timestamp / 500) * 0.4
-        mod2 = (bet_amount / (balance + 1)) * 0.8
-        mod3 = ((user_id + timestamp) % 20) * 0.1
+        base = random.uniform(0.7, 1.3)
+        mod1 = math.cos(timestamp / 500) * 0.2
+        mod2 = (bet_amount / (balance + 1)) * 0.3
+        mod3 = ((user_id + timestamp) % 20) * 0.05
         coefficient = base + mod1 - mod2 + mod3
-        return max(1.0, min(100.0, coefficient * 50))
+        return max(0.5, min(10.0, coefficient * 2.0))
     
     return 1.0
 
-async def play_dice(user_id: int, bet_amount: int, guess: int) -> Tuple[bool, float, int, list, int]:
+async def play_dice(user_id: int, bet_amount: int, guess: int) -> Tuple[bool, float, int, list, int, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0.0, 0, [], 0
+        return False, 0.0, 0, [], 0, 0
     
-    # ✅ ВЫЗЫВАЕМ ФУНКЦИЮ БОНУСОВ (РАНЬШЕ ЭТОГО НЕ БЫЛО!)
-    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "dice", bet_amount)
+    original_bet, bonuses, applied_events = apply_event_bonuses(user_id, "dice", bet_amount)
+    actual_bet = max(0, bet_amount - bonuses['discount_amount'])
     
-    # Проверяем, хватает ли баланса после применения скидок
-    if user['balance'] < final_bet:
-        return False, 0.0, 0, [], 0
+    if user['balance'] < actual_bet:
+        return False, 0.0, 0, [], 0, 0
     
-    coefficient = calculate_complex_coefficient(user_id, final_bet, "dice")
+    # ✅ Базовый коэффициент игры
+    base_coefficient = calculate_complex_coefficient(user_id, original_bet, "dice")
     roll = random.randint(1, 6)
     total_win_amount = 0
     
     if guess == roll:
-        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
-        base_win = int(final_bet * coefficient)          # Базовый выигрыш
-        total_win = base_win + bonuses['fixed_bonus']    # + фиксированный бонус
-        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        # ✅ ПРАВИЛЬНОЕ ПРИМЕНЕНИЕ МНОЖИТЕЛЕЙ:
+        base_win = int(original_bet * base_coefficient)          # Базовый выигрыш
+        total_with_fixed = base_win + bonuses['fixed_bonus']     # + фиксированный бонус
+        total_win_amount = int(total_with_fixed * bonuses['event_multiplier'])  # × множитель события
         
-        update_balance(user_id, total_win_amount)
+        net_win = total_win_amount - actual_bet
+        update_balance(user_id, net_win)
         add_transaction(user_id, total_win_amount, "win", "dice", 
-                       f"guess:{guess},roll:{roll},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
-        return True, coefficient, roll, applied_events, total_win_amount
+                       f"guess:{guess},roll:{roll},base_coef:{base_coefficient:.2f},event_mult:{bonuses['event_multiplier']},events:{applied_events}")
+        return True, base_coefficient * bonuses['event_multiplier'], roll, applied_events, total_win_amount, actual_bet
     
-    # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet (уже со скидкой)
-    update_balance(user_id, -final_bet)
-    add_transaction(user_id, -final_bet, "loss", "dice", 
-                   f"guess:{guess},roll:{roll},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
-    return False, coefficient, roll, applied_events, 0
+    update_balance(user_id, -actual_bet)
+    add_transaction(user_id, -actual_bet, "loss", "dice", 
+                   f"guess:{guess},roll:{roll},base_coef:{base_coefficient:.2f},events:{applied_events}")
+    return False, base_coefficient, roll, applied_events, 0, actual_bet
 
-async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list, list, int]:
+async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list, list, int, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0.0, [], [], 0
+        return False, 0.0, [], [], 0, 0
     
-    # ✅ ВЫЗЫВАЕМ ФУНКЦИЮ БОНУСОВ
-    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "slots", bet_amount)
+    # ПРИМЕНЯЕМ БОНУСЫ
+    original_bet, bonuses, applied_events = apply_event_bonuses(user_id, "slots", bet_amount)
+    actual_bet = max(0, bet_amount - bonuses['discount_amount'])
     
-    if user['balance'] < final_bet:
-        return False, 0.0, [], [], 0
+    if user['balance'] < actual_bet:
+        return False, 0.0, [], [], 0, 0
     
-    coefficient = calculate_complex_coefficient(user_id, final_bet, "slots")
+    # ✅ Базовый коэффициент игры (уже реалистичный)
+    base_coefficient = calculate_complex_coefficient(user_id, original_bet, "slots")
+    
     symbols = ['🍒', '🍋', '🍊', '🍇', '🍉', '7']
     reels = [random.choice(symbols) for _ in range(3)]
     
@@ -720,33 +723,36 @@ async def play_slots(user_id: int, bet_amount: int) -> Tuple[bool, float, list, 
     win_coefficient = 0
     
     if reels[0] == reels[1] == reels[2]:
-        win_coefficient = 10 if reels[0] == '7' else 3
-        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
-        base_win = int(final_bet * win_coefficient)       # Базовый выигрыш
-        total_win = base_win + bonuses['fixed_bonus']     # + фиксированный бонус
-        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        win_coefficient = 5.0 if reels[0] == '7' else 3.0  # ✅ Реалистичные коэффициенты
+        # ✅ ПРАВИЛЬНОЕ ПРИМЕНЕНИЕ МНОЖИТЕЛЕЙ:
+        base_win = int(original_bet * win_coefficient)          # Базовый выигрыш
+        total_with_base = base_win * base_coefficient           # × коэффициент игры
+        total_with_fixed = total_with_base + bonuses['fixed_bonus']  # + фиксированный бонус
+        total_win_amount = int(total_with_fixed * bonuses['event_multiplier'])  # × множитель события
         
-        update_balance(user_id, total_win_amount)
+        net_win = total_win_amount - actual_bet
+        update_balance(user_id, net_win)
         add_transaction(user_id, total_win_amount, "win", "slots", 
-                       f"reels:{''.join(reels)},coef:{coefficient:.2f}x{win_coefficient},events:{applied_events},final_bet:{final_bet}")
-        return True, coefficient * win_coefficient, reels, applied_events, total_win_amount
+                       f"reels:{''.join(reels)},win_coef:{win_coefficient},base_coef:{base_coefficient:.2f},event_mult:{bonuses['event_multiplier']},events:{applied_events}")
+        return True, win_coefficient * base_coefficient * bonuses['event_multiplier'], reels, applied_events, total_win_amount, actual_bet, base_coefficient, bonuses
+        
     elif reels[0] == reels[1] or reels[1] == reels[2]:
         win_coefficient = 0.5
-        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
-        base_win = int(final_bet * win_coefficient)       # Базовый выигрыш
-        total_win = base_win + bonuses['fixed_bonus']     # + фиксированный бонус
-        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        base_win = int(original_bet * win_coefficient)
+        total_with_base = base_win * base_coefficient
+        total_with_fixed = total_with_base + bonuses['fixed_bonus']
+        total_win_amount = int(total_with_fixed * bonuses['event_multiplier'])
         
-        update_balance(user_id, total_win_amount)
+        net_win = total_win_amount - actual_bet
+        update_balance(user_id, net_win)
         add_transaction(user_id, total_win_amount, "win", "slots", 
-                       f"reels:{''.join(reels)},coef:0.5,events:{applied_events},final_bet:{final_bet}")
-        return True, 0.5, reels, applied_events, total_win_amount
+                       f"reels:{''.join(reels)},win_coef:0.5,base_coef:{base_coefficient:.2f},event_mult:{bonuses['event_multiplier']},events:{applied_events}")
+        return True, 0.5 * base_coefficient * bonuses['event_multiplier'], reels, applied_events, total_win_amount, actual_bet
     
-    # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet
-    update_balance(user_id, -final_bet)
-    add_transaction(user_id, -final_bet, "loss", "slots", 
-                   f"reels:{''.join(reels)},coef:{coefficient:.2f},events:{applied_events},final_bet:{final_bet}")
-    return False, coefficient, reels, applied_events, 0
+    update_balance(user_id, -actual_bet)
+    add_transaction(user_id, -actual_bet, "loss", "slots", 
+                   f"reels:{''.join(reels)},base_coef:{base_coefficient:.2f},events:{applied_events}")
+    return False, base_coefficient, reels, applied_events, 0, actual_bet
 
 
 # Обработчики команд
@@ -1467,7 +1473,6 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     
     try:
-        # Если это выбор числа для ставки
         if context.user_data.get('roulette_bet_type') == 'number' and 'roulette_number' not in context.user_data:
             number = int(text)
             if number < 0 or number > 36:
@@ -1481,7 +1486,6 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
             
-        # Обработка суммы ставки
         bet_amount = int(text)
         if bet_amount <= 0:
             await update.message.reply_text("❌ Сумма ставки должна быть положительной!")
@@ -1491,38 +1495,44 @@ async def handle_roulette_bet(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(f"❌ Недостаточно средств! Ваш баланс: {user_data['balance']}")
             return
             
-        # Получаем тип ставки
         bet_type = context.user_data['roulette_bet_type']
         
-        # Для ставки на число используем сохраненное число
         if bet_type == 'number':
             if 'roulette_number' not in context.user_data:
                 await update.message.reply_text("❌ Сначала выберите число!")
                 return
             bet_type = str(context.user_data['roulette_number'])
         
-        # Играем с учетом бонусов событий
-        win, payout, result, applied_events, final_bet = await play_roulette(user_id, bet_type, bet_amount)
+        won, win_amount, result, applied_events, original_bet, paid_amount, bonuses = await play_roulette(user_id, bet_type, bet_amount)
         
-        # Формируем ответ
-        if win:
-            response = f"🎉 Вы выиграли {payout} монет!\n"
-        else:
-            response = f"❌ Вы проиграли {final_bet} монет.\n"
+        bet_type_name = {
+            'red': '🔴 Красное', 'black': '⚫ Черное', 
+            'even': '🔢 Четное', 'odd': '🔣 Нечетное',
+            '1to18': '1-18', '19to36': '19-36'
+        }.get(bet_type, f'число {bet_type}')
+        
+        if won:
+            response = f"🎉 Вы выиграли {win_amount} монет!\n"
+            response += f"💵 Уплачено: {paid_amount} монет (скидка: {bet_amount - paid_amount})\n"
+            response += f"🎡 Ставка: {bet_type_name}\n"
+            response += f"🎡 {result}\n"
             
-        response += f"🎡 {result}\n"
+            if bonuses['event_multiplier'] > 1.0:
+                response += f"📈 Множитель события: x{bonuses['event_multiplier']}\n"
+        else:
+            response = f"❌ Вы проиграли {paid_amount} монет.\n"
+            response += f"💵 Скидка: {bet_amount - paid_amount} монет\n"
+            response += f"🎡 Ставка: {bet_type_name}\n"
+            response += f"🎡 {result}\n"
         
-        # Добавляем информацию о примененных бонусах
         if applied_events:
-            response += f"🎁 Примененные бонусы: {', '.join(applied_events)}\n"
+            response = f"🎁 <b>АКТИВНЫЕ БОНУСЫ:</b>\n" + "\n".join([f"   • {bonus}" for bonus in applied_events]) + "\n\n" + response
             
         response += f"💰 Ваш баланс: {get_user(user_id)['balance']}"
 
-        # Кнопка для повторной игры
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎡 Играть снова", callback_data='game_roulette')]])
-        await update.message.reply_text(response, reply_markup=keyboard)
+        await update.message.reply_text(response, reply_markup=keyboard, parse_mode='HTML')
         
-        # Очищаем контекст
         context.user_data.pop('roulette_bet_type', None)
         context.user_data.pop('roulette_number', None)
         
@@ -1609,17 +1619,19 @@ async def game_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[bool, int, str, list, int]:
+async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[bool, int, str, list, int, int]:
     user = get_user(user_id)
     if not user or user['balance'] < bet_amount:
-        return False, 0, "Недостаточно средств", [], 0
+        return False, 0, "Недостаточно средств", [], 0, 0
     
-    # ПРИМЕНЯЕМ БОНУСЫ СОБЫТИЙ
-    final_bet, bonuses, applied_events = apply_event_bonuses(user_id, "roulette", bet_amount)
+    # ПРИМЕНЯЕМ БОНУСЫ (возвращает исходную ставку + отдельно скидку)
+    original_bet, bonuses, applied_events = apply_event_bonuses(user_id, "roulette", bet_amount)
     
-    # Проверяем, хватает ли баланса после применения скидок
-    if user['balance'] < final_bet:
-        return False, 0, "Недостаточно средств после применения скидок", [], 0
+    # РАССЧИТЫВАЕМ сколько реально спишется (ставка минус скидка)
+    actual_bet = max(0, bet_amount - bonuses['discount_amount'])
+    
+    if user['balance'] < actual_bet:
+        return False, 0, "Недостаточно средств после применения скидок", [], 0, 0
 
     # Генерация случайного числа (0-36)
     winning_number = random.randint(0, 36)
@@ -1640,52 +1652,52 @@ async def play_roulette(user_id: int, bet_type: str, bet_amount: int) -> Tuple[b
     if bet_type.isdigit():  # Ставка на конкретное число (1-36)
         if int(bet_type) == winning_number:
             win = True
-            base_payout = final_bet * 35
+            base_payout = original_bet * 35  # ✅ От полной ставки!
             payout_multiplier = 35
     else:
         bet_type = bet_type.lower()
         if bet_type == "red" and color == "red":
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
         elif bet_type == "black" and color == "black":
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
         elif bet_type == "even" and winning_number % 2 == 0 and winning_number != 0:
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
         elif bet_type == "odd" and winning_number % 2 == 1:
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
         elif bet_type == "1to18" and 1 <= winning_number <= 18:
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
         elif bet_type == "19to36" and 19 <= winning_number <= 36:
             win = True
-            base_payout = final_bet * 1
+            base_payout = original_bet * 1  # ✅ От полной ставки!
             payout_multiplier = 1
 
     total_win_amount = 0
     
     if win:
-        # ✅ ПРИМЕНЯЕМ БОНУСЫ ПРАВИЛЬНО
-        total_win = base_payout + bonuses['fixed_bonus']     # + фиксированный бонус
-        total_win_amount = int(total_win * bonuses['multiplier'])  # × множитель
+        # ✅ ПРАВИЛЬНОЕ ПРИМЕНЕНИЕ МНОЖИТЕЛЕЙ:
+        total_with_fixed = base_payout + bonuses['fixed_bonus']     # + фиксированный бонус
+        total_win_amount = int(total_with_fixed * bonuses['event_multiplier'])  # × множитель события
         
-        update_balance(user_id, total_win_amount)
+        net_win = total_win_amount - actual_bet
+        update_balance(user_id, net_win)
         add_transaction(user_id, total_win_amount, "win", "roulette", 
-                       f"bet:{bet_type},win:{winning_number},payout_x:{payout_multiplier},events:{applied_events},final_bet:{final_bet}")
+                       f"bet:{bet_type},win:{winning_number},payout_x:{payout_multiplier},event_mult:{bonuses['event_multiplier']},events:{applied_events}")
     else:
-        # ✅ ПРИ ПРОИГРЫШЕ: списываем только final_bet
-        update_balance(user_id, -final_bet)
-        add_transaction(user_id, -final_bet, "loss", "roulette", 
-                       f"bet:{bet_type},win:{winning_number},events:{applied_events},final_bet:{final_bet}")
+        update_balance(user_id, -actual_bet)
+        add_transaction(user_id, -actual_bet, "loss", "roulette", 
+                       f"bet:{bet_type},win:{winning_number},events:{applied_events}")
 
-    return win, total_win_amount, f"Выпало: {winning_number} ({color})", applied_events, final_bet
+    return win, total_win_amount, f"Выпало: {winning_number} ({color})", applied_events, original_bet, actual_bet, bonuses
 
 async def transfer_money_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.edit_message_text(
@@ -2022,20 +2034,22 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return
                 
             guess = context.user_data['dice_guess']
-            won, coefficient, roll, applied_events, win_amount = await play_dice(user_id, bet_amount, guess)
+            won, coefficient, roll, applied_events, win_amount, paid_amount, base_coef, bonuses = await play_dice(user_id, bet_amount, guess)
             
             response = (
                 f"🎉 Поздравляем! Выигрыш: {win_amount} монет!\n"
+                f"💵 Уплачено: {paid_amount} монет (скидка: {bet_amount - paid_amount})\n"
                 f"🎲 Выпало: {roll} (ставка: {guess})\n"
-                f"📈 Коэф: {coefficient:.2f}x\n"
-                if won else
-                f"❌ Проигрыш: {bet_amount} монет\n"
-                f"🎲 Выпало: {roll} (ставка: {guess})\n"
-                f"📈 Коэф был: {coefficient:.2f}x\n"
+                f"📈 Общий коэффициент: {coefficient:.2f}x\n"
             )
             
+            # Добавляем детализацию коэффициентов если есть события
+            if bonuses['event_multiplier'] > 1.0:
+                response += f"   • Коэффициент игры: {base_coef:.2f}x\n"
+                response += f"   • Множитель события: x{bonuses['event_multiplier']}\n"
+            
         elif game_type == 'slots':
-            won, coefficient, reels, applied_events, win_amount = await play_slots(user_id, bet_amount)
+            won, coefficient, reels, applied_events, win_amount, paid_amount, base_coef, bonuses = await play_slots(user_id, bet_amount)
             
             if won:
                 if reels[0] == reels[1] == reels[2]:
@@ -2046,34 +2060,78 @@ async def handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 response = (
                     f"{win_text}\n🎰 {' '.join(reels)}\n"
                     f"💰 Выигрыш: {win_amount} монет!\n"
-                    f"📈 Коэф: {coefficient:.2f}x\n"
+                    f"💵 Уплачено: {paid_amount} монет (скидка: {bet_amount - paid_amount})\n"
+                    f"📈 Общий коэффициент: {coefficient:.2f}x\n"
                 )
+                
+                # Добавляем детализацию коэффициентов если есть события
+                if bonuses['event_multiplier'] > 1.0:
+                    response += f"   • Коэффициент игры: {base_coef:.2f}x\n"
+                    response += f"   • Множитель события: x{bonuses['event_multiplier']}\n"
             else:
                 response = (
-                    f"❌ Проигрыш: {bet_amount} монет\n"
+                    f"❌ Проигрыш: {paid_amount} монет\n"
+                    f"💵 Скидка: {bet_amount - paid_amount} монет\n"
                     f"🎰 {' '.join(reels)}\n"
-                    f"📈 Коэф был: {coefficient:.2f}x\n"
+                    f"📈 Коэффициент был: {coefficient:.2f}x\n"
+                )
+        
+        elif game_type == 'roulette':
+            bet_type = context.user_data['roulette_bet_type']
+            
+            if bet_type == 'number':
+                if 'roulette_number' not in context.user_data:
+                    await update.message.reply_text("❌ Сначала выберите число!")
+                    return
+                bet_type = str(context.user_data['roulette_number'])
+            
+            won, win_amount, result, applied_events, original_bet, paid_amount, bonuses = await play_roulette(user_id, bet_type, bet_amount)
+            
+            bet_type_name = {
+                'red': '🔴 Красное', 'black': '⚫ Черное', 
+                'even': '🔢 Четное', 'odd': '🔣 Нечетное',
+                '1to18': '1-18', '19to36': '19-36'
+            }.get(bet_type, f'число {bet_type}')
+            
+            if won:
+                response = (
+                    f"🎉 Вы выиграли {win_amount} монет!\n"
+                    f"💵 Уплачено: {paid_amount} монет (скидка: {bet_amount - paid_amount})\n"
+                    f"🎡 Ставка: {bet_type_name}\n"
+                    f"🎡 {result}\n"
+                )
+                
+                # Добавляем детализацию если есть события
+                if bonuses['event_multiplier'] > 1.0:
+                    response += f"📈 Множитель события: x{bonuses['event_multiplier']}\n"
+            else:
+                response = (
+                    f"❌ Вы проиграли {paid_amount} монет.\n"
+                    f"💵 Скидка: {bet_amount - paid_amount} монет\n"
+                    f"🎡 Ставка: {bet_type_name}\n"
+                    f"🎡 {result}\n"
                 )
         
         # Добавляем информацию о примененных бонусах
         if applied_events:
-            response += f"🎁 Примененные бонусы: {', '.join(applied_events)}\n"
-        if applied_events:
-            bonus_text = "🎁 АКТИВНЫЕ БОНУСЫ:\n"
-            for bonus in applied_events:
-                bonus_text += f"   • {bonus}\n"
-            response = bonus_text + response
+            response = f"🎁 <b>АКТИВНЫЕ БОНУСЫ:</b>\n" + "\n".join([f"   • {bonus}" for bonus in applied_events]) + "\n\n" + response
+        
         # Общий вывод для всех игр
-        response += f"💰 Баланс: {get_user(user_id)['balance']}"
+        current_balance = get_user(user_id)['balance']
+        response += f"\n💰 Текущий баланс: {current_balance} монет"
+        
         keyboard = [
             [InlineKeyboardButton("🔄 Играть снова", callback_data=f'game_{game_type}')],
             [InlineKeyboardButton("🔙 В меню", callback_data='back_to_menu')]
         ]
-        await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         
         # Очищаем контекст
         context.user_data.pop('current_game', None)
         context.user_data.pop('dice_guess', None)
+        context.user_data.pop('roulette_bet_type', None)
+        context.user_data.pop('roulette_number', None)
         
     except ValueError:
         await update.message.reply_text("❌ Введите целое число!")
