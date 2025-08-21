@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация бота
-TOKEN = "7334381322:AAFnQuyzmVEyxhWMt8CMz1Y8wh4dxDVkibs"
+TOKEN = "7802784921:AAHjeDU2Cp_THJGEnDpsvE5sM67L3qxQioQ"
 ADMIN_IDS = [123456789]  # Ваш Telegram ID
 DATABASE_NAME = "casino_bot.db"
 INITIAL_BALANCE = 1000
